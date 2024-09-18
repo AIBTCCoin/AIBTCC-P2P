@@ -1,0 +1,15 @@
+# Ignore the tests directory
+tests/
+
+# Ignore specific files in src directory
+src/main.js
+src/keygenerator.js
+
+# Ignore configuration and output files
+.eslintrc.js
+.travis.yml
+.nyc_output
+
+# Ignore the create_tables.sql file in .database directory
+.database/create_tables.sql
+

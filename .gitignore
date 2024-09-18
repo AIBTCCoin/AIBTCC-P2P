@@ -1,0 +1,9 @@
+node_modules
+.vscode
+coverage
+.nyc_output
+yarn.lockcoverage
+
+# Ignore the create_tables.sql file
+database/create_tables.sql
+

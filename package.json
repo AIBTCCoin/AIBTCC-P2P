@@ -1,0 +1,53 @@
+{
+  "name": "aibtccoin",
+  "version": "1.0.1",
+  "type": "module",
+  "description": "Blockchain implementation in Javascript.",
+  "keywords": [
+    "blockchain",
+    "javascript"
+  ],
+  "scripts": {
+    "start-node1": "cross-env DATABASE_NAME=blockchain1 P2P_PORT=6001 node blockchain-cli.js",
+    "start-node2": "cross-env DATABASE_NAME=blockchain2 P2P_PORT=6002 PEERS=ws://localhost:6001 node blockchain-cli.js",
+    "start-node3": "cross-env DATABASE_NAME=blockchain3 P2P_PORT=6003 PEERS=ws://localhost:6001,ws://localhost:6002 node blockchain-cli.js",
+    "test": "mocha 'tests/**/*.test.js'"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "body-parser": "^1.20.3",
+    "bs58": "^6.0.0",
+    "bs58check": "^4.0.0",
+    "crypto": "^1.0.1",
+    "debug": "^4.3.5",
+    "decimal.js": "^10.4.3",
+    "elliptic": "^6.5.6",
+    "express": "^4.20.0",
+    "flatted": "^3.3.1",
+    "jsonwebtoken": "^9.0.2",
+    "mysql": "^2.18.1",
+    "mysql2": "^3.10.3",
+    "prettier": "^2.7.1",
+    "uuid": "^8.3.2",
+    "ws": "^8.18.0",
+    "yargs": "^17.7.2"
+  },
+  "devDependencies": {
+    "chai": "^5.1.1",
+    "cross-env": "^7.0.3",
+    "eslint": "^7.12.1",
+    "eslint-config-standard": "^16.0.3",
+    "eslint-plugin-import": "^2.25.4",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-promise": "^5.2.0",
+    "mocha": "^10.6.1",
+    "sinon": "^18.0.0"
+  },
+  "main": "blockchain-cli.js",
+  "directories": {
+    "test": "tests"
+  },
+  "author": "",
+  "license": "ISC"
+}
+
