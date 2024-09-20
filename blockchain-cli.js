@@ -1,7 +1,7 @@
 import readline from 'readline';
 import { blockchainInstance, Transaction } from './src/blockchain.js'; // Adjust based on your exports
 import { createNewWallet, loadWallet, ec } from './src/wallet.js';
-import { MerkleTree, MerkleProofPath } from './src/merkleTree.js';
+import { MerkleTree, MerkleProofPath, Node } from './src/merkleTree.js';
 import { db } from './src/db.js';
 import crypto from 'crypto';
 import util from 'util';
@@ -573,20 +573,36 @@ async function verifyMerkleProofByTransactionHash() {
 
     const merkleRoot = blockResult[0].merkle_root;
 
-    // Use the verifyProof method
-    const isValid = MerkleTree.verifyProof(transactionHash, proofPath, merkleRoot);
+    // Initialize the hash with the transaction hash
+    let currentHash = transactionHash;
+    console.log("Initial leaf hash:", currentHash);
 
-    // Log the details
-    console.log("Initial leaf hash:", transactionHash);
+    // Iterate through each step in the proof path
     proofPath.forEach((step, index) => {
+      const { siblingHash, direction } = step;
+      let parentHash;
+
+      if (direction === 'left') {
+        parentHash = Node.hash(currentHash + siblingHash);
+      } else if (direction === 'right') {
+        parentHash = Node.hash(siblingHash + currentHash);
+      } else {
+        throw new Error(`Invalid direction '${direction}' in proof path.`);
+      }
+
       console.log(`Step ${index + 1}:`);
-      console.log(`Sibling hash: ${step.siblingHash}`);
-      console.log(`Parent hash: ${step.parentHash}`);
-      console.log(`  Direction: ${step.direction}`);
+      console.log(`Sibling hash: ${siblingHash}`);
+      console.log(`Parent hash: ${parentHash}`);
+      console.log(`  Direction: ${direction}`);
+
+      // Update the current hash to the parent hash for the next iteration
+      currentHash = parentHash;
     });
+
     console.log("Expected root hash:", merkleRoot);
 
-    if (isValid) {
+    // Final verification
+    if (currentHash === merkleRoot) {
       console.log("Merkle proof is valid.");
     } else {
       console.log("Merkle proof is invalid.");
@@ -595,6 +611,7 @@ async function verifyMerkleProofByTransactionHash() {
     console.error("Error verifying Merkle proof:", err);
   }
 }
+
 
 
 main().catch(console.error);
