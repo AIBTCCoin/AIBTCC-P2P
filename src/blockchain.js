@@ -143,7 +143,7 @@ class Blockchain {
       console.log("Saving genesis block to the database...");
       await genesisBlock.save();
       console.log(`Genesis block created with initial balance of ${initialReward} to address ${genesisAddress}`);
-
+      
     } catch (err) {
       console.error("Error saving genesis block:", err);
       throw err;
@@ -363,11 +363,12 @@ class Blockchain {
   
     if (receivedCumulativeDifficulty > localCumulativeDifficulty) {
       try {
+        
   
-        // Reset In-Memory Chain**
+        // Reset In-Memory Chain
         this.chain = [];
   
-        // Add New Chain**
+        // Add New Chain
         for (const blockData of newChainData) {
           const newBlock = Block.fromJSON(blockData);
           await newBlock.save();
