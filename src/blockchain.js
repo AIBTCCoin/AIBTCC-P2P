@@ -17,7 +17,7 @@ class Blockchain {
       return Blockchain.instance;
     }
     this.chain = [];
-    this.difficulty = 0; // Set a realistic difficulty
+    this.difficulty = 2; // Set a realistic difficulty
     this.pendingTransactions = [];
     this.miningReward = 100;
     this.minerAddress = "59a8277a36bffda17f9a997e5f7c23";
@@ -38,6 +38,7 @@ class Blockchain {
     await this.initializeGenesisBlock();
     await this.loadChainFromDatabase();
     this.startTimeBasedMining(this.miningIntervalInSeconds);
+    this.isSynchronized = true;
 
     setInterval(async () => {
       const pendingTxCount = await this.countPendingTransactions();
@@ -141,9 +142,8 @@ class Blockchain {
     try {
       console.log("Saving genesis block to the database...");
       await genesisBlock.save();
-      console.log(
-        console.log(`Genesis block created with initial balance of ${initialReward} to address ${genesisAddress}`)
-      );
+      console.log(`Genesis block created with initial balance of ${initialReward} to address ${genesisAddress}`);
+
     } catch (err) {
       console.error("Error saving genesis block:", err);
       throw err;
@@ -348,13 +348,13 @@ class Blockchain {
   // Replace the current chain with a new chain
   async replaceChain(newChainData) {
     if (newChainData.length <= this.chain.length) {
-      
+      console.log("Received chain is not longer than the current chain. Ignoring.");
       return;
     }
   
     const isValid = await Blockchain.isValidChain(newChainData);
     if (!isValid) {
-      console.log("Received chain is invalid.");
+      console.log("Received chain is invalid. Ignoring.");
       return;
     }
   
@@ -363,28 +363,29 @@ class Blockchain {
   
     if (receivedCumulativeDifficulty > localCumulativeDifficulty) {
       try {
+  
+        // Reset In-Memory Chain**
         this.chain = [];
+  
+        // Add New Chain**
         for (const blockData of newChainData) {
-          const loadedBlock = await Block.load(blockData.hash);
-          if (loadedBlock) {
-            
-            this.chain.push(loadedBlock);
-          } else {
-            
-            const newBlock = Block.fromJSON(blockData);
-            await newBlock.save();
-            this.chain.push(newBlock);
-          }
+          const newBlock = Block.fromJSON(blockData);
+          await newBlock.save();
+          this.chain.push(newBlock);
         }
-        
-        broadcastChain();
+  
+        console.log("Replaced local chain with the received full chain.");
+        this.isSynchronized = true;
+        broadcastChain(); // Notify other peers about the updated chain
       } catch (err) {
         console.error("Error replacing chain:", err);
       }
     } else {
-
+      console.log("Received chain does not have higher cumulative difficulty.");
     }
   }
+  
+  
 
   async getBalanceOfAddress(address) {
     const query = `
@@ -412,49 +413,47 @@ class Blockchain {
     if (chainData.length === 0) return false;
   
     const firstBlock = chainData[0];
-    // Update the condition to accept 'null' for the genesis block's previous_hash
-    if (firstBlock.index !== 0 || firstBlock.previous_hash !== null) {
+    // Validate genesis block
+    if (firstBlock.index !== 0 || (firstBlock.previous_hash !== null && firstBlock.previous_hash !== '0')) {
       console.log("Invalid genesis block.");
       return false;
     }
-
-    if (firstBlock.index === 0) {
-      return true;
-    }
-
-    const tempBalances = {};
   
-    // Continue with the rest of the validation
+    // Continue with the rest of the validation without early return
     for (let i = 1; i < chainData.length; i++) {
       const currentBlock = chainData[i];
       const previousBlock = chainData[i - 1];
   
+      // Validate previous hash linkage
       if (currentBlock.previous_hash !== previousBlock.hash) {
         console.log(`Block ${currentBlock.index} has invalid previous hash.`);
         return false;
       }
   
+      // Recalculate and verify hash
       const tempBlock = Block.fromJSON(currentBlock);
-      if (currentBlock.hash !== tempBlock.hash()) {
+      if (currentBlock.hash !== tempBlock.calculateHash()) { // Ensure using correct hash calculation method
         console.log(`Block ${currentBlock.index} has invalid hash.`);
         return false;
       }
   
+      // Verify difficulty
       if (currentBlock.hash.substring(0, currentBlock.difficulty) !== Array(currentBlock.difficulty + 1).join("0")) {
         console.log(`Block ${currentBlock.index} does not meet difficulty requirements.`);
         return false;
       }
   
+      // Validate all transactions within the block
       const isValidTransactions = await tempBlock.hasValidTransactions();
       if (!isValidTransactions) {
         console.log(`Block ${currentBlock.index} contains invalid transactions.`);
         return false;
       }
-
     }
   
-    return true;
+    return true; // All blocks are valid
   }
+  
 
   /**
    * Verify if a transaction is in the specified block

@@ -35,9 +35,16 @@ class Block {
   }
   
   static fromJSON(data) {
+    let previousHash = data.previous_hash;
+  
+    // Convert specific string representations to null
+    if (previousHash === '0' || previousHash === '' || previousHash === 'null') {
+      previousHash = null;
+    }
+
     const block = new Block(
       data.index,
-      data.previous_hash,
+      previousHash,
       data.timestamp,
       data.transactions.map(txData => Transaction.fromJSON(txData)),
       data.difficulty
@@ -91,7 +98,7 @@ class Block {
     );
   
     const dataToHash =
-      (this.previousHash || '0') +
+      this.previousHash +
       this.timestamp +
       this.merkleRoot +
       this.nonce +
@@ -212,7 +219,7 @@ class Block {
       block.nonce = result.nonce;
       block.merkleRoot = result.merkle_root;
       block.originTransactionHash = result.origin_transaction_hash;
-  
+
       // Load transactions in the correct order
       const txQuery = "SELECT hash FROM transactions WHERE block_hash = ? ORDER BY index_in_block ASC";
       const [txResults] = await db.query(txQuery, [block.hash]);

@@ -18,10 +18,16 @@ function initConnection(ws) {
   initErrorHandler(ws);
   sendChain(ws); // Send the current chain to the new peer
 
-  // After connecting, request the genesis block from the peer
-  requestGenesisBlock();
+  requestFullChain(ws);
 }
 
+function requestFullChain(ws) {
+  ws.send(JSON.stringify({
+    type: 'REQUEST_FULL_CHAIN',
+  }));
+}
+
+/*
 let genesisRequestSent = false;
 
 function requestGenesisBlock() {
@@ -34,7 +40,7 @@ function requestGenesisBlock() {
       });
       genesisRequestSent = true;  // Mark as sent to prevent multiple requests
     }
-}
+}*/
 
 function initMessageHandler(ws) {
   ws.on('message', async (data) => {
@@ -47,10 +53,16 @@ function initMessageHandler(ws) {
             break;
         case 'GENESIS_BLOCK':
           await handleReceivedGenesisBlock(message.data);
-            break;    
-        case 'CHAIN':
+            break; 
+        case 'REQUEST_FULL_CHAIN':
+          await handleFullChainRequest(ws);
+            break;
+        case 'FULL_CHAIN':
+          await handleReceivedFullChain(message.data);
+            break;       
+        /*case 'CHAIN':
           await handleReceivedChain(message.data);
-          break;
+          break;*/
         case 'NEW_BLOCK':
           await handleReceivedBlock(message.data);
           break;
@@ -211,7 +223,7 @@ async function handleReceivedChain(receivedChain) {
     } catch (err) {
       console.error("Error handling received chain:", err);
     }
-  }
+}
 
 let lastProcessedBlockHash = null;
 
@@ -298,6 +310,46 @@ async function handleReceivedTransaction(receivedTxData, senderSocket) {
     broadcastTransaction(tx, senderSocket);
   } catch (error) {
     console.error('Failed to add received transaction:', error.message);
+  }
+}
+
+async function handleFullChainRequest(ws) {
+  const chainData = blockchainInstance.chain.map(block => block.toJSON());
+  ws.send(JSON.stringify({
+    type: 'FULL_CHAIN',
+    data: chainData,
+  }));
+  console.log('Sent full chain to requesting peer.');
+}
+
+
+async function handleReceivedFullChain(receivedChain) {
+  try {
+    if (!receivedChain || receivedChain.length === 0) {
+      console.log("Received empty chain.");
+      return;
+    }
+
+    const isValid = await blockchainInstance.constructor.isValidChain(receivedChain);
+    if (!isValid) {
+      console.log("Received chain is invalid.");
+      return;
+    }
+
+    const localCumulativeDifficulty = blockchainInstance.calculateCumulativeDifficulty(
+      blockchainInstance.chain.map(block => block.toJSON())
+    );
+    const receivedCumulativeDifficulty = blockchainInstance.calculateCumulativeDifficulty(receivedChain);
+
+    if (receivedCumulativeDifficulty > localCumulativeDifficulty) {
+      await blockchainInstance.replaceChain(receivedChain);
+      broadcastChain(); // Notify other peers about the updated chain
+      console.log("Replaced local chain with the received full chain.");
+    } else {
+      console.log("Local chain has higher or equal cumulative difficulty. No replacement needed.");
+    }
+  } catch (err) {
+    console.error("Error handling received full chain:", err);
   }
 }
 
