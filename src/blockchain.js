@@ -27,6 +27,8 @@ class Blockchain {
 
     this.connectedPeers = [];
 
+    this.isReplacingChain = false;
+
     Blockchain.instance = this;
   }
 
@@ -50,7 +52,7 @@ class Blockchain {
 
 
   async initializeGenesisBlock() {
-    console.log("Checking for existing genesis block...");
+    
     const query = "SELECT * FROM blocks WHERE `index` = 0";
     
     try {
@@ -60,14 +62,17 @@ class Blockchain {
             const genesisBlock = await Block.load(rows[0].hash);
             if (this.chain.length === 0) {
                 this.chain.push(genesisBlock); // Only add to memory if chain is empty
+                console.log(`Genesis block loaded with hash: ${genesisBlock.hash}`);
             }
         } else {
-            const genesisBlock = await this.fetchGenesisBlockFromPeers();
-  
-            if (genesisBlock) {
-                this.chain.push(genesisBlock);
-                await genesisBlock.save();
+          // No genesis block found in the database
+            if (this.connectedPeers.length > 0) {
+                // If there are connected peers, wait for the full chain to be received
+                console.log("Waiting for chain from peers...");
+                // The chain will be replaced when a FULL_CHAIN message is received
             } else {
+                // No peers connected; this node should create the genesis block
+                
                 await this.createGenesisBlockWithReward(this.genesisAddress, 1000000);
             }
         }
@@ -76,45 +81,6 @@ class Blockchain {
         throw err;
     }
   }
-
-
-
-
-  async fetchGenesisBlockFromPeers() {
-    if (!this.connectedPeers || this.connectedPeers.length === 0) {
-        return null;
-    }
-
-    // Create a promise that waits for the genesis block to be received
-    return new Promise((resolve, reject) => {
-        let genesisBlockReceived = false;
-
-        // Set up a timeout in case the peers do not respond in time
-        const timeout = setTimeout(() => {
-            if (!genesisBlockReceived) {
-                reject(new Error("Timeout: No genesis block received from peers."));
-            }
-        }, 5000); // 5-second timeout, adjust as needed
-
-        // Send a request to all connected peers
-        this.connectedPeers.forEach((peer) => {
-            peer.send(JSON.stringify({
-                type: 'REQUEST_GENESIS_BLOCK'
-            }));
-
-            // Listen for incoming messages
-            peer.on('message', (data) => {
-                const message = JSON.parse(data);
-                if (message.type === 'GENESIS_BLOCK' && !genesisBlockReceived) {
-                    genesisBlockReceived = true;
-                    clearTimeout(timeout); // Clear the timeout when a response is received
-                    const genesisBlock = Block.fromJSON(message.data);
-                    resolve(genesisBlock); // Resolve with the genesis block
-                }
-            });
-        });
-    });
-}
 
 
 
@@ -347,42 +313,81 @@ class Blockchain {
 
   // Replace the current chain with a new chain
   async replaceChain(newChainData) {
-    if (newChainData.length <= this.chain.length) {
-      console.log("Received chain is not longer than the current chain. Ignoring.");
+    if (this.isReplacingChain) {
+      
       return;
     }
-  
-    const isValid = await Blockchain.isValidChain(newChainData);
-    if (!isValid) {
-      console.log("Received chain is invalid. Ignoring.");
-      return;
-    }
-  
-    const localCumulativeDifficulty = this.calculateCumulativeDifficulty(this.chain.map(block => block.toJSON()));
-    const receivedCumulativeDifficulty = this.calculateCumulativeDifficulty(newChainData);
-  
-    if (receivedCumulativeDifficulty > localCumulativeDifficulty) {
-      try {
-        
-  
-        // Reset In-Memory Chain
-        this.chain = [];
-  
-        // Add New Chain
-        for (const blockData of newChainData) {
-          const newBlock = Block.fromJSON(blockData);
-          await newBlock.save();
-          this.chain.push(newBlock);
-        }
-  
-        console.log("Replaced local chain with the received full chain.");
-        this.isSynchronized = true;
-        broadcastChain(); // Notify other peers about the updated chain
-      } catch (err) {
-        console.error("Error replacing chain:", err);
+
+    this.isReplacingChain = true; // Set the flag
+
+    try {
+      if (newChainData.length <= this.chain.length) {
+        console.log("Received chain is not longer than the current chain. Ignoring.");
+        return;
       }
-    } else {
-      console.log("Received chain does not have higher cumulative difficulty.");
+
+      const isValid = await Blockchain.isValidChain(newChainData);
+      if (!isValid) {
+        console.log("Received chain is invalid. Ignoring.");
+        return;
+      }
+
+      const localCumulativeDifficulty = this.calculateCumulativeDifficulty(this.chain.map(block => block.toJSON()));
+      const receivedCumulativeDifficulty = this.calculateCumulativeDifficulty(newChainData);
+
+      if (receivedCumulativeDifficulty > localCumulativeDifficulty) {
+        try {
+          // Clear the local database before replacing
+          await this.clearLocalBlockchainData();
+
+          // Reset In-Memory Chain
+          this.chain = [];
+
+          // Add New Chain
+          for (const blockData of newChainData) {
+            const newBlock = Block.fromJSON(blockData);
+            await newBlock.save();
+            this.chain.push(newBlock);
+          }
+
+          
+          this.isSynchronized = true;
+          broadcastChain(); // Notify other peers about the updated chain
+        } catch (err) {
+          console.error("Error replacing chain:", err);
+        }
+      } else {
+        console.log("Received chain does not have higher cumulative difficulty.");
+      }
+    } finally {
+      this.isReplacingChain = false; // Reset the flag
+    }
+  }
+
+  async clearLocalBlockchainData() {
+    try {
+      // Delete all transactions
+      await db.query("DELETE FROM transactions");
+  
+      // Delete all pending transactions
+      await db.query("DELETE FROM pending_transactions");
+  
+      // Delete all Merkle nodes
+      await db.query("DELETE FROM merkle_nodes");
+  
+      // Delete all Merkle proof paths
+      await db.query("DELETE FROM merkle_proof_paths");
+  
+      // Delete all blocks
+      await db.query("DELETE FROM blocks");
+  
+      // Reset address balances
+      await db.query("DELETE FROM address_balances");
+  
+      
+    } catch (err) {
+      console.error("Error clearing local blockchain data:", err);
+      throw err;
     }
   }
   
@@ -415,8 +420,14 @@ class Blockchain {
   
     const firstBlock = chainData[0];
     // Validate genesis block
-    if (firstBlock.index !== 0 || (firstBlock.previous_hash !== null && firstBlock.previous_hash !== '0')) {
-      console.log("Invalid genesis block.");
+    if (firstBlock.index !== 0) {
+        console.log("Invalid genesis block index.");
+        return false;
+    }
+
+    // Allow previous_hash to be null or '0' for genesis block
+    if (firstBlock.previous_hash !== null && firstBlock.previous_hash !== '0') {
+      console.log("Invalid genesis block previous_hash.");
       return false;
     }
   
@@ -496,6 +507,18 @@ class Blockchain {
         const block = await Block.load(result.hash);
         if (block) {
           this.chain.push(block);
+        }
+      }
+
+      if (this.chain.length === 0) {
+        if (this.connectedPeers.length > 0) {
+          // No blocks in DB and peers are connected; wait for chain from peers
+          
+          return;
+        } else {
+          // No blocks and no peers; create genesis block
+          console.log("No blocks in DB and no peers connected. Creating genesis block...");
+          await this.createGenesisBlockWithReward(this.genesisAddress, 1000000);
         }
       }
   

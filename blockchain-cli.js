@@ -8,7 +8,6 @@ import util from 'util';
 import Decimal from 'decimal.js';
 import { initP2PServer, broadcastBlock, broadcastChain, broadcastTransaction } from './src/p2p.js';
 
-//const queryAsync = util.promisify(db.query).bind(db);
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -420,44 +419,51 @@ async function runTransactionAndMiningTest() {
 }
 
 async function validateBlockchain() {
-  const GENESIS_BLOCK_INDEX = 0;
   let validatedBlocksCount = 0;
   let validatedTransactionsCount = 0;
 
   try {
-    for (let i = 0; i < blockchainInstance.chain.length; i++) {
-      const block = blockchainInstance.chain[i];
+    // Step 1: Validate the entire blockchain
+    const isValid = await blockchainInstance.isChainValid();
+    if (!isValid) {
+      console.log("Blockchain is invalid.");
+      return;
+    }
+    console.log("All blocks in the chain are valid.");
 
-      // Validate block integrity
-      const isBlockValid = await blockchainInstance.constructor.isValidChain(blockchainInstance.chain.slice(0, i + 1).map(b => b.toJSON()));
-      if (!isBlockValid) {
-        console.log(`Block ${i} is invalid.`);
-        return;
-      }
+    validatedBlocksCount = blockchainInstance.chain.length;
 
+    // Step 2: Validate each transaction individually (excluding mining rewards)
+    for (const block of blockchainInstance.chain) {
       for (const transaction of block.transactions) {
-        const isGenesisBlock = i === GENESIS_BLOCK_INDEX;
-        const isValid = await validateTransaction(transaction, i, isGenesisBlock);
+        const isMiningReward = (transaction.fromAddress === null);
 
-        if (!isValid) {
-          console.log(`Invalid transaction ${transaction.hash} in block ${i}.`);
-          return;
+        if (!isMiningReward) {
+          const isValidTx = await validateTransaction(transaction, block.index, false);
+          if (!isValidTx) {
+            console.log(`Invalid transaction ${transaction.hash} in block ${block.index}.`);
+            return;
+          }
+          validatedTransactionsCount++;
         }
-
-        validatedTransactionsCount++;
       }
-
-      validatedBlocksCount++;
     }
 
+    // Step 3: Validate balances
     const allAddresses = getAllAddressesFromBlockchain();
+    let balancesAreValid = true;
 
     for (const address of allAddresses) {
       const balance = await blockchainInstance.getBalanceOfAddress(address);
       if (new Decimal(balance).isNegative()) {
         console.log(`Negative balance found for address ${address}.`);
-        return;
+        balancesAreValid = false;
       }
+    }
+
+    if (!balancesAreValid) {
+      console.log("Balance validation failed.");
+      return;
     }
 
     console.log("Blockchain validation passed. All transactions and balances are correct.");
@@ -468,15 +474,15 @@ async function validateBlockchain() {
   }
 }
 
+
 function isHexString(str) {
   return typeof str === 'string' && /^[0-9a-fA-F]+$/.test(str);
 }
 
 async function validateTransaction(transaction, blockIndex, isGenesis = false) {
-  const GENESIS_ADDRESS = '6c7f05cca415fd2073de8ea8853834';
-  const isMiningReward = transaction === blockchainInstance.chain[blockIndex].transactions[blockchainInstance.chain[blockIndex].transactions.length - 1];
+  const isMiningReward = (transaction.fromAddress === null);
 
-  if (isGenesis || transaction.fromAddress === GENESIS_ADDRESS || isMiningReward) {
+  if (isGenesis || isMiningReward) {
     return true;
   }
 
@@ -492,8 +498,6 @@ async function validateTransaction(transaction, blockIndex, isGenesis = false) {
   }
 
   try {
-    console.log(`Verifying transaction from address: ${transaction.fromAddress}`);
-
     // Validate the publicKey field
     if (!transaction.publicKey || (transaction.publicKey.length !== 66 && transaction.publicKey.length !== 130)) {
       console.error(`Invalid public key length for transaction ${transaction.hash}`);
@@ -526,6 +530,7 @@ async function validateTransaction(transaction, blockIndex, isGenesis = false) {
 
   return true;
 }
+
 
 function getAllAddressesFromBlockchain() {
   const addresses = new Set();
