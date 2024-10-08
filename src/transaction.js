@@ -1,15 +1,15 @@
 "use strict";
 
-import crypto from 'crypto'; // Required for creating cryptographic hashes
-import elliptic from 'elliptic';
+import crypto from "crypto"; // Required for creating cryptographic hashes
+import elliptic from "elliptic";
 const { ec: EC } = elliptic;
 import { db } from './db.js'; // Database module for interacting with the database
-import {MerkleTree, MerkleProofPath} from './merkleTree.js'; // Importing MerkleTree and Node classes
+import { MerkleTree, MerkleProofPath } from './merkleTree.js'; // Importing MerkleTree and Node classes
 
 import { createNewWallet, loadWallet } from './wallet.js';
 
 import util from 'util';
-import Decimal from'decimal.js';
+import Decimal from 'decimal.js';
 
 const ec = new EC("secp256k1"); // Initialize the elliptic curve for cryptography
 
@@ -25,7 +25,11 @@ class Transaction {
     blockHash = "",
     originTransactionHash = null,
     publicKey = "",
-    index_in_block = null
+    index_in_block = null,
+    tokenId = null, // New parameter for token ID
+    tokenName = null, // New field
+    tokenSymbol = null, // New field
+    tokenTotalSupply = null // New field
   ) {
     this.fromAddress = fromAddress; // Address sending the funds
     this.toAddress = toAddress; // Address receiving the funds
@@ -37,6 +41,10 @@ class Transaction {
     this.publicKey = publicKey; 
     this.hash = this.calculateHash(); // Calculate the transaction hash
     this.index_in_block = index_in_block;
+    this.tokenId = tokenId; // New property
+    this.tokenName = tokenName; // Initialize new fields
+    this.tokenSymbol = tokenSymbol;
+    this.tokenTotalSupply = tokenTotalSupply;
   }
 
   toJSON() {
@@ -50,7 +58,11 @@ class Transaction {
       originTransactionHash: this.originTransactionHash,
       publicKey: this.publicKey,
       hash: this.hash,
-      index_in_block: this.index_in_block 
+      index_in_block: this.index_in_block,
+      tokenId: this.tokenId, // New property
+      tokenName: this.tokenName, // Include in JSON
+      tokenSymbol: this.tokenSymbol,
+      tokenTotalSupply: this.tokenTotalSupply,
     };
   }
   
@@ -64,7 +76,11 @@ class Transaction {
       data.blockHash,
       data.originTransactionHash,
       data.publicKey,
-      data.index_in_block
+      data.index_in_block,
+      data.tokenId, // New property
+      data.tokenName, // Initialize new fields
+      data.tokenSymbol,
+      data.tokenTotalSupply
     );
     tx.hash = data.hash;
     return tx;
@@ -72,17 +88,20 @@ class Transaction {
 
   // Calculate the hash of the transaction
   calculateHash() {
-    const amountStr = new Decimal(this.amount).toFixed(8); // Ensure consistent decimal formatting
-    const originHashStr = this.originTransactionHash || ''; // Use empty string if null
+    const data = {
+      fromAddress: this.fromAddress,
+      toAddress: this.toAddress,
+      amount: new Decimal(this.amount).toFixed(8),
+      tokenId: this.tokenId,
+      tokenName: this.tokenName, // Include token details
+      tokenSymbol: this.tokenSymbol,
+      tokenTotalSupply: this.tokenTotalSupply,
+      originTransactionHash: this.originTransactionHash,
+      timestamp: this.timestamp
+    };
     return crypto
       .createHash("sha256")
-      .update(
-        this.fromAddress +
-          this.toAddress +
-          amountStr +
-          originHashStr +
-          this.timestamp
-      )
+      .update(JSON.stringify(data))
       .digest("hex");
   }
 
@@ -95,10 +114,13 @@ class Transaction {
       
       // Sign the transaction
       const hashTx = this.calculateHash();
-      //console.log(`Signing transaction with hash: ${hashTx}`);
       const signature = keyPair.sign(hashTx, 'hex');
       this.signature = signature.toDER('hex');
       this.publicKey = publicKey;
+  
+      // Recalculate the hash after signing to include signature and publicKey
+      this.hash = this.calculateHash(); // <-- Updated Line
+
     } catch (error) {
       throw new Error('Failed to sign with address: ' + error.message);
     }
@@ -132,7 +154,7 @@ class Transaction {
   async save() {
     this.isValid();
   
-    const query = "INSERT INTO transactions (hash, from_address, to_address, amount, origin_transaction_hash, timestamp, signature, block_hash, public_key, index_in_block) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    const query = "INSERT INTO transactions (hash, from_address, to_address, amount, origin_transaction_hash, timestamp, signature, block_hash, public_key, index_in_block, token_id, token_name, token_symbol, token_total_supply) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     const values = [
       this.hash,
       this.fromAddress,
@@ -143,7 +165,11 @@ class Transaction {
       this.signature,
       this.blockHash,
       this.publicKey,
-      this.index_in_block 
+      this.index_in_block,
+      this.tokenId, // New field
+      this.tokenName, // New field
+      this.tokenSymbol, // New field
+      this.tokenTotalSupply // New field
     ];
   
     try {
@@ -173,7 +199,11 @@ class Transaction {
         txData.block_hash,
         txData.origin_transaction_hash,
         txData.public_key,
-        txData.index_in_block  
+        txData.index_in_block,
+        txData.token_id, // New field
+        txData.token_name, // New field
+        txData.token_symbol, // New field
+        txData.token_total_supply // New field
       );
       tx.hash = txData.hash;
   
@@ -188,14 +218,11 @@ class Transaction {
       throw err;
     }
   }
-  
-
-  
 
   async savePending() {
     const query = `
-      INSERT INTO pending_transactions (hash, from_address, to_address, amount, timestamp, signature, origin_transaction_hash) 
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO pending_transactions (hash, from_address, to_address, amount, timestamp, signature, origin_transaction_hash, token_id) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE hash = hash
     `;
     const values = [
@@ -206,6 +233,7 @@ class Transaction {
       this.timestamp,
       this.signature,
       this.originTransactionHash,
+      this.tokenId // New field
     ];
   
   
@@ -217,7 +245,6 @@ class Transaction {
       throw err;
     }
   }
-  
 
   // Load all pending transactions
   static async loadPendingTransactions() {
@@ -234,7 +261,9 @@ class Transaction {
           txData.signature,
           null, // block_hash is null for pending
           txData.origin_transaction_hash,
-          txData.public_key
+          txData.public_key,
+          txData.index_in_block,
+          txData.token_id // New field
         );
         tx.hash = txData.hash;
         return tx;
@@ -262,8 +291,9 @@ class Transaction {
   }
 
   // Get the latest transaction for a given address
-  static async getLatestTransactionForAddress(address) {
-  
+  // C:\ProjectsCaronia\AIBTCC-P2P\AIBTCC-P2P\src\transaction.js
+
+static async getLatestTransactionForAddress(address) {
     const query = `
       SELECT * 
       FROM transactions 
@@ -272,35 +302,35 @@ class Transaction {
       LIMIT 1
     `;
   
-  
     try {
-      // Execute the query using await
       const [results] = await db.query(query, [address]);
   
       if (results.length === 0) {
-        console.log("No transactions found for address:", address);
-        return null;
+        // No outgoing transactions, check for incoming token creation
+        const tokenCreationQuery = `
+          SELECT * 
+          FROM transactions 
+          WHERE to_address = ? AND token_id IS NOT NULL
+          ORDER BY timestamp DESC 
+          LIMIT 1
+        `;
+        const [tokenResults] = await db.query(tokenCreationQuery, [address]);
+        if (tokenResults.length === 0) {
+          console.log("No transactions found for address:", address);
+          return null;
+        }
+        return Transaction.fromJSON(tokenResults[0]);
       }
   
       const txData = results[0];
-      const tx = new Transaction(
-        txData.from_address,
-        txData.to_address,
-        txData.amount,
-        txData.timestamp,
-        txData.signature,
-        txData.block_hash,
-        txData.origin_transaction_hash,
-        txData.public_key
-      );
-      tx.hash = txData.hash;
-  
+      const tx = Transaction.fromJSON(txData);
       return tx;
     } catch (err) {
       console.error("Error fetching latest transaction:", err);
       throw err;
     }
-  } 
+  }
+  
 
   verifyTransaction() {
     const expectedHash = this.calculateHash();
@@ -318,4 +348,4 @@ class Transaction {
   }
 }
 
-export {Transaction};
+export { Transaction };

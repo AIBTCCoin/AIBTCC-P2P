@@ -57,7 +57,9 @@ async function main() {
     8. Run transaction test 
     9. Validate blockchain
     10. Verify Merkle proof by transaction hash 
-    11. Exit
+    11. Create a new token 
+    12. Transfer tokens
+    13. Exit
     `);
 
     const choice = await askQuestion("Select an option: ");
@@ -94,9 +96,15 @@ async function main() {
         await verifyMerkleProofByTransactionHash();
         break;
       case "11":
+        await createNewTokenCLI();
+        break;
+      case "12":
+        await transferTokensCLI();
+        break;
+      case "13":
         console.log("Exiting...");
         rl.close();
-        return;
+        return;  
       default:
         console.log("Invalid option. Please try again.");
     }
@@ -105,13 +113,10 @@ async function main() {
 
 async function sendTransaction() {
   try {
-    console.log("Starting transaction submission process...");
     if (!(await blockchainInstance.isChainValid())) {
       console.log("Blockchain is invalid. Transaction cannot proceed.");
       return;
     }
-
-    console.log("Blockchain is valid. Proceeding with transaction.");
 
     const fromAddress = await askQuestion("Enter your wallet address: ");
 
@@ -130,7 +135,6 @@ async function sendTransaction() {
     }
 
     const privateKey = await askQuestion("Enter your private key: ");
-    console.log("Private key entered.");
 
     if (!privateKey || privateKey.length !== 64) {
       console.log("Invalid private key.");
@@ -149,7 +153,6 @@ async function sendTransaction() {
     console.log("Private key validated successfully.");
 
     const toAddress = await askQuestion("Enter the recipient address: ");
-    console.log("Recipient address entered.");
 
     if (!toAddress || toAddress.length < 24 || toAddress.length > 30) {
       console.log("Invalid wallet address.");
@@ -157,7 +160,6 @@ async function sendTransaction() {
     }
 
     const amountInput = await askQuestion("Enter the amount to send: ");
-    console.log(`Amount entered: ${amountInput}`);
 
     const amount = parseFloat(amountInput);
 
@@ -168,9 +170,9 @@ async function sendTransaction() {
 
     console.log("Fetching sender's balance...");
     const senderBalance = await blockchainInstance.getBalanceOfAddress(fromAddress);
-    console.log(`Sender's balance: ${senderBalance}`);
+    console.log(`Sender's balance: ${senderBalance.native}`); // Updated to display native balance
 
-    if (new Decimal(senderBalance).lessThan(amount)) {
+    if (new Decimal(senderBalance.native).lessThan(amount)) { // Updated to use native balance
       console.log("Insufficient funds in the wallet.");
       return;
     }
@@ -181,15 +183,14 @@ async function sendTransaction() {
     console.log("Creating new transaction...");
     const tx = new Transaction(fromAddress, toAddress, amount, Date.now(), null, "", originTransactionHash);
     await tx.signWithAddress(fromAddress); // This now includes publicKey
-    console.log("Transaction signed successfully.");
 
-    console.log("Adding pending transaction...");
     await blockchainInstance.addPendingTransaction(tx);
     console.log("Transaction submitted successfully.");
   } catch (error) {
     console.error("Error in sendTransaction:", error);
   }
 }
+
 
 async function viewBlockchain() {
   if (!blockchainInstance.isChainValid()) {
@@ -212,18 +213,35 @@ async function checkBalance() {
     return;
   }
 
-  if (!blockchainInstance.isChainValid()) {
+  // Ensure that isChainValid is awaited since it's an async function
+  if (!(await blockchainInstance.isChainValid())) {
     console.log("Blockchain is invalid. Cannot fetch balance.");
     return;
   }
 
   try {
     const balance = await blockchainInstance.getBalanceOfAddress(address);
-    console.log(`Balance of address ${address}: ${balance}`);
+    console.log(`\nBalance of address ${address}:`);
+
+    // Display Native Balance
+    console.log(`  Native Balance: ${balance.native}`);
+
+    // Display Token Balances with Symbols
+    const tokenEntries = Object.entries(balance.tokens);
+    if (tokenEntries.length > 0) {
+      console.log("  Token Balances:");
+      for (const [tokenId, tokenInfo] of tokenEntries) {
+        console.log(`    - ${tokenInfo.token_symbol} (ID ${tokenId}): ${tokenInfo.balance}`);
+      }
+    } else {
+      console.log("  No token balances.");
+    }
+    console.log(""); // Add an empty line for better readability
   } catch (error) {
     console.error("Error fetching balance:", error);
   }
 }
+
 
 async function viewTransactionsForAddress() {
   const address = await askQuestion("Enter the address to view transactions: ");
@@ -233,7 +251,7 @@ async function viewTransactionsForAddress() {
     return;
   }
 
-  if (!blockchainInstance.isChainValid()) {
+  if (!(await blockchainInstance.isChainValid())) { // Ensure proper async handling
     console.log("Blockchain is invalid. Cannot view transactions.");
     return;
   }
@@ -251,20 +269,27 @@ async function viewTransactionsForAddress() {
   if (allTransactions.length === 0) {
     console.log(`No transactions found for address ${address}`);
   } else {
-    console.log(`Transactions for address ${address}:`);
+    console.log(`\nTransactions for address ${address}:\n`);
     allTransactions.forEach((transaction, index) => {
-      console.log(`
-        Transaction ${index + 1}:
-        From: ${transaction.fromAddress}
-        To: ${transaction.toAddress}
-        Amount: ${transaction.amount}
-        Timestamp: ${new Date(transaction.timestamp).toLocaleString()}
-        Hash: ${transaction.hash}
-        Public Key: ${transaction.publicKey}
-      `);
+      const isTokenTransaction = transaction.tokenId !== null;
+      console.log(`Transaction ${index + 1}:`);
+      console.log(`  Type: ${isTokenTransaction ? 'Token' : 'Native'}`);
+      console.log(`  From: ${transaction.fromAddress}`);
+      console.log(`  To: ${transaction.toAddress}`);
+      console.log(`  Amount: ${transaction.amount}`);
+      
+      if (isTokenTransaction) {
+        console.log(`  Token ID: ${transaction.tokenId}`);
+        console.log(`  Token Symbol: ${transaction.tokenSymbol}`);
+      }
+      
+      console.log(`  Timestamp: ${new Date(transaction.timestamp).toLocaleString()}`);
+      console.log(`  Hash: ${transaction.hash}`);
+      console.log(`  Public Key: ${transaction.publicKey}\n`);
     });
   }
 }
+
 
 async function traceTransaction() {
   const transactionHash = await askQuestion("Enter the transaction hash to trace: ");
@@ -274,7 +299,7 @@ async function traceTransaction() {
     return;
   }
 
-  if (!blockchainInstance.isChainValid()) {
+  if (!(await blockchainInstance.isChainValid())) { // Ensure proper async handling
     console.log("Blockchain is invalid. Cannot trace transaction.");
     return;
   }
@@ -282,26 +307,56 @@ async function traceTransaction() {
   let foundTransaction = null;
   let blockIndex = null;
 
-  blockchainInstance.chain.forEach((block, index) => {
-    block.transactions.forEach((transaction) => {
+  // Iterate through the blockchain to find the transaction
+  for (let i = 0; i < blockchainInstance.chain.length; i++) {
+    const block = blockchainInstance.chain[i];
+    for (let j = 0; j < block.transactions.length; j++) {
+      const transaction = block.transactions[j];
       if (transaction.hash === transactionHash) {
         foundTransaction = transaction;
-        blockIndex = index;
+        blockIndex = i;
+        break;
       }
-    });
-  });
+    }
+    if (foundTransaction) break;
+  }
 
   if (foundTransaction) {
-    console.log(`
-      Transaction found in Block ${blockIndex}:
-      From: ${foundTransaction.fromAddress}
-      To: ${foundTransaction.toAddress}
-      Amount: ${foundTransaction.amount}
-      Timestamp: ${new Date(foundTransaction.timestamp).toLocaleString()}
-      Hash: ${foundTransaction.hash}
-      Origin Transaction Hash: ${foundTransaction.originTransactionHash}
-      Public Key: ${foundTransaction.publicKey}
-    `);
+    displayTransactionDetails(foundTransaction, blockIndex);
+
+    // Optionally, trace back through origin transactions
+    let currentTransaction = foundTransaction;
+    let currentBlockIndex = blockIndex;
+
+    while (currentTransaction.originTransactionHash) {
+      const originHash = currentTransaction.originTransactionHash;
+      let originTransaction = null;
+      let originBlockIndex = null;
+
+      // Search for the origin transaction in the blockchain
+      for (let i = 0; i < blockchainInstance.chain.length; i++) {
+        const block = blockchainInstance.chain[i];
+        for (let j = 0; j < block.transactions.length; j++) {
+          const tx = block.transactions[j];
+          if (tx.hash === originHash) {
+            originTransaction = tx;
+            originBlockIndex = i;
+            break;
+          }
+        }
+        if (originTransaction) break;
+      }
+
+      if (originTransaction) {
+        displayTransactionDetails(originTransaction, originBlockIndex);
+        currentTransaction = originTransaction;
+        currentBlockIndex = originBlockIndex;
+      } else {
+        console.log(`Reached the end of the transaction chain. Origin transaction hash ${originHash} not found.`);
+        break;
+      }
+    }
+
   } else {
     console.log(`Transaction with hash ${transactionHash} not found.`);
   }
@@ -315,7 +370,7 @@ async function traceFundMovement() {
     return;
   }
 
-  if (!blockchainInstance.isChainValid()) {
+  if (!(await blockchainInstance.isChainValid())) { // Ensure proper async handling
     console.log("Blockchain is invalid. Cannot trace fund movement.");
     return;
   }
@@ -368,18 +423,27 @@ async function traceFundMovement() {
   }
 }
 
+
 function displayTransactionDetails(transaction, blockIndex) {
-  console.log(`
-    Transaction found in Block ${blockIndex}:
-    From: ${transaction.fromAddress}
-    To: ${transaction.toAddress}
-    Amount: ${transaction.amount}
-    Timestamp: ${new Date(transaction.timestamp).toLocaleString()}
-    Hash: ${transaction.hash}
-    Previous Transaction Hash: ${transaction.originTransactionHash}
-    Public Key: ${transaction.publicKey} 
-  `);
+  const isTokenTransaction = transaction.tokenId !== null;
+
+  console.log(`Transaction found in Block ${blockIndex}:`);
+  console.log(`  Type: ${isTokenTransaction ? 'Token' : 'Native'}`);
+  console.log(`  From: ${transaction.fromAddress}`);
+  console.log(`  To: ${transaction.toAddress}`);
+  console.log(`  Amount: ${transaction.amount}`);
+
+  if (isTokenTransaction) {
+    console.log(`  Token ID: ${transaction.tokenId}`);
+    console.log(`  Token Symbol: ${transaction.tokenSymbol}`);
+  }
+
+  console.log(`  Timestamp: ${new Date(transaction.timestamp).toLocaleString()}`);
+  console.log(`  Hash: ${transaction.hash}`);
+  console.log(`  Origin Transaction Hash: ${transaction.originTransactionHash}`);
+  console.log(`  Public Key: ${transaction.publicKey}\n`);
 }
+
 
 async function runTransactionAndMiningTest() {
   console.log("Running transaction test...");
@@ -433,10 +497,11 @@ async function validateBlockchain() {
 
     validatedBlocksCount = blockchainInstance.chain.length;
 
-    // Step 2: Validate each transaction individually (excluding mining rewards)
+    // Step 2: Validate each transaction individually
     for (const block of blockchainInstance.chain) {
       for (const transaction of block.transactions) {
-        const isMiningReward = (transaction.fromAddress === null);
+        // Distinguish between mining rewards and token creation transactions
+        const isMiningReward = (transaction.fromAddress === null && transaction.tokenId === null);
 
         if (!isMiningReward) {
           const isValidTx = await validateTransaction(transaction, block.index, false);
@@ -455,9 +520,35 @@ async function validateBlockchain() {
 
     for (const address of allAddresses) {
       const balance = await blockchainInstance.getBalanceOfAddress(address);
-      if (new Decimal(balance).isNegative()) {
-        console.log(`Negative balance found for address ${address}.`);
+      
+      // Validate Native Balance
+      try {
+        if (balance.native) {
+          const nativeBalance = new Decimal(balance.native);
+          if (nativeBalance.isNegative()) {
+            console.log(`Negative native balance found for address ${address}.`);
+            balancesAreValid = false;
+          }
+        }
+      } catch (err) {
+        console.error(`Error parsing native balance for address ${address}:`, err.message);
         balancesAreValid = false;
+      }
+
+      // Validate Token Balances
+      if (balance.tokens) {
+        for (const [tokenSymbol, tokenInfo] of Object.entries(balance.tokens)) {
+          try {
+            const tokenBalance = new Decimal(tokenInfo.balance);
+            if (tokenBalance.isNegative()) {
+              console.log(`Negative balance for token '${tokenSymbol}' (ID ${tokenInfo.token_id}) found for address ${address}.`);
+              balancesAreValid = false;
+            }
+          } catch (err) {
+            console.error(`Error parsing token balance for '${tokenSymbol}' (ID ${tokenInfo.token_id}) for address ${address}:`, err.message);
+            balancesAreValid = false;
+          }
+        }
       }
     }
 
@@ -473,6 +564,7 @@ async function validateBlockchain() {
     console.error("Error validating blockchain:", error);
   }
 }
+
 
 
 function isHexString(str) {
@@ -616,6 +708,139 @@ async function verifyMerkleProofByTransactionHash() {
     console.error("Error verifying Merkle proof:", err);
   }
 }
+
+async function createNewTokenCLI() {
+  const name = await askQuestion("Enter token name: ");
+  const symbol = await askQuestion("Enter token symbol: ");
+  const totalSupplyInput = await askQuestion("Enter total supply: ");
+  const creatorAddress = await askQuestion("Enter your wallet address: ");
+
+  const totalSupply = parseFloat(totalSupplyInput);
+  if (isNaN(totalSupply) || totalSupply <= 0) {
+    console.log("Invalid total supply.");
+    return;
+  }
+
+  try {
+    const token = await blockchainInstance.createToken(name, symbol, totalSupply, creatorAddress);
+    console.log(`Token ID ${token.token_id} created with initial balance of ${token.total_supply} to address ${token.creator_address}.`);
+  } catch (error) {
+    console.error("Error creating token:", error.message);
+  }
+}
+
+async function transferTokensCLI() {
+  try {
+
+    const fromAddress = await askQuestion("Enter your wallet address: ");
+
+    if (!fromAddress || fromAddress.length < 24 || fromAddress.length > 30) {
+      console.log("Invalid wallet address.");
+      return;
+    }
+
+    let wallet;
+    try {
+      wallet = loadWallet(fromAddress);
+    } catch (error) {
+      console.log("Wallet not found.");
+      return;
+    }
+
+    const privateKey = await askQuestion("Enter your private key: ");
+
+    if (!privateKey || privateKey.length !== 64) {
+      console.log("Invalid private key.");
+      return;
+    }
+
+    const keyPair = ec.keyFromPrivate(privateKey);
+    const publicKey = keyPair.getPublic('hex');
+    const derivedAddress = crypto
+      .createHash('sha256')
+      .update(Buffer.from(publicKey, 'hex'))
+      .digest('hex')
+      .slice(0, 30);
+
+    if (derivedAddress !== fromAddress) {
+      console.log("Private key does not correspond to the provided address.");
+      return;
+    }
+
+    console.log("Private key validated successfully.");
+
+    const toAddress = await askQuestion("Enter the recipient's address: ");
+
+    if (!toAddress || toAddress.length < 24 || toAddress.length > 30) {
+      console.log("Invalid recipient wallet address.");
+      return;
+    }
+
+    const tokenIdInput = await askQuestion("Enter token ID: ");
+    const amountInput = await askQuestion("Enter amount to transfer: ");
+
+    const tokenId = parseInt(tokenIdInput, 10);
+    const amount = parseFloat(amountInput);
+
+    if (isNaN(tokenId) || isNaN(amount) || amount <= 0) {
+      console.log("Invalid token ID or amount.");
+      return;
+    }
+
+    // **Check if Token Exists**
+    const tokenExistsQuery = "SELECT * FROM tokens WHERE token_id = ?";
+    const [tokenRows] = await db.query(tokenExistsQuery, [tokenId]);
+
+    if (tokenRows.length === 0) {
+      console.log(`Token with ID ${tokenId} does not exist.`);
+      return;
+    }
+
+    // Fetch the token symbol
+    const tokenSymbol = tokenRows[0].symbol; // Adjust if the field name differs
+
+    console.log("Fetching sender's token balance...");
+    const senderBalanceObj = await blockchainInstance.getBalanceOfAddress(fromAddress);
+    const senderTokenBalance =
+      senderBalanceObj.tokens && senderBalanceObj.tokens[tokenId]
+        ? senderBalanceObj.tokens[tokenId].balance
+        : "0.00000000";
+    console.log(`Sender's balance for Token ID ${tokenId}: ${senderTokenBalance}`);
+
+    if (new Decimal(senderTokenBalance).lessThan(amount)) {
+      console.log("Insufficient token balance.");
+      return;
+    }
+
+    // **Retrieve the latest transaction (outgoing or token creation) for originTransactionHash**
+    const latestTransaction = await Transaction.getLatestTransactionForAddress(fromAddress);
+    const originTransactionHash = latestTransaction ? latestTransaction.hash : null;
+
+    console.log("Creating and signing token transfer transaction...");
+    const tx = new Transaction(
+      fromAddress,
+      toAddress,
+      amount,
+      Date.now(),
+      null,
+      null,
+      originTransactionHash,
+      '',
+      null,
+      tokenId,
+      null,
+      tokenSymbol
+    );
+    await tx.signWithAddress(fromAddress); // This includes publicKey
+    console.log("Transaction signed successfully.");
+
+    await blockchainInstance.addPendingTransaction(tx);
+    console.log("Token transfer submitted successfully.");
+  } catch (error) {
+    console.error("Error in transferTokensCLI:", error.message);
+  }
+}
+
 
 
 

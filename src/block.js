@@ -6,7 +6,6 @@ import { Transaction } from './transaction.js';
 import { MerkleTree, MerkleProofPath } from './merkleTree.js';
 import Decimal from 'decimal.js';
 
-
 class Block {
   constructor(index, previousHash, timestamp, transactions, difficulty) {
     this.index = index;
@@ -88,6 +87,7 @@ class Block {
             fromAddress: tx.fromAddress,
             toAddress: tx.toAddress,
             amount: new Decimal(tx.amount).toFixed(8),
+            tokenId: tx.tokenId, // Include tokenId in hash calculation
             timestamp: tx.timestamp,
             signature: tx.signature,
             originTransactionHash: tx.originTransactionHash,
@@ -98,12 +98,11 @@ class Block {
     );
   
     const dataToHash =
-      this.previousHash +
+      (this.previousHash || '') +
       this.timestamp +
       this.merkleRoot +
       this.nonce +
-      (this.originTransactionHash || '') +
-      transactionsData;
+      (this.originTransactionHash || '');
 
     const hash = crypto
       .createHash("sha256")
@@ -129,8 +128,8 @@ class Block {
 
       tx.verifyTransaction();
 
-      if (!tx.isValid()) {
-        console.error(`Invalid transaction: ${tx.hash}`); // Log invalid transactions
+      if (tx.fromAddress !== null && !tx.isValid()) {
+        console.error(`Invalid transaction: ${tx.hash}`);
         return false;
       }
     }
@@ -138,7 +137,18 @@ class Block {
   }
 
   async save() {
-    const query = "INSERT INTO blocks (hash, previous_hash, timestamp, nonce, difficulty, merkle_root, `index`, origin_transaction_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+    const query = `
+      INSERT INTO blocks (
+        hash, 
+        previous_hash, 
+        timestamp, 
+        nonce, 
+        difficulty, 
+        merkle_root, 
+        \`index\`, 
+        origin_transaction_hash
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `;
     const values = [
       this.hash,
       this.previousHash,
@@ -152,35 +162,107 @@ class Block {
     
     try {
       const [results] = await db.query(query, values);
-
-      
-      for (let i = 0; i < this.transactions.length; i++) {
-        const tx = this.transactions[i];
+  
+      // Separate transactions into token creation and regular transactions
+      const tokenCreationTransactions = this.transactions.filter(tx => 
+        tx.tokenId && tx.tokenName && tx.tokenSymbol && tx.tokenTotalSupply
+      );
+      const regularTransactions = this.transactions.filter(tx => 
+        !(tx.tokenId && tx.tokenName && tx.tokenSymbol && tx.tokenTotalSupply)
+      );
+  
+      // First, process token creation transactions
+      for (let i = 0; i < tokenCreationTransactions.length; i++) {
+        const tx = tokenCreationTransactions[i];
         tx.blockHash = this.hash;
         tx.index_in_block = i; // Assign the transaction's index
+  
+        // **Ensure creator_address exists in address_balances**
+        const insertAddressQuery = `
+          INSERT INTO address_balances (address, balance)
+          VALUES (?, 0.00000000)
+          ON DUPLICATE KEY UPDATE balance = balance
+        `;
+        await db.query(insertAddressQuery, [tx.toAddress]);
+  
+        // Insert the token into the tokens table
+        const insertTokenQuery = `
+          INSERT INTO tokens (
+            token_id, 
+            name, 
+            symbol, 
+            total_supply, 
+            creator_address, 
+            timestamp
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE 
+            name = VALUES(name), 
+            symbol = VALUES(symbol), 
+            total_supply = VALUES(total_supply), 
+            creator_address = VALUES(creator_address), 
+            timestamp = VALUES(timestamp)
+        `;
+        const tokenValues = [
+          tx.tokenId, 
+          tx.tokenName, 
+          tx.tokenSymbol, 
+          tx.tokenTotalSupply, 
+          tx.toAddress, 
+          tx.timestamp
+        ];
+        const [tokenResult] = await db.query(insertTokenQuery, tokenValues);
+  
+        // Check if the token was newly created
+        if (tokenResult.affectedRows === 1) { // Token was inserted
+          // Insert the token balance for the creator
+          const insertTokenBalanceQuery = `
+            INSERT INTO token_balances (address, token_id, balance)
+            VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE balance = balance
+          `;
+          await db.query(insertTokenBalanceQuery, [tx.toAddress, tx.tokenId, tx.amount]);
+          
+        } else {
+          // Token already exists; do not update the balance to prevent duplication
+          console.log(`Token ID ${tx.tokenId} already exists. Skipping balance update.`);
+        }
+  
+        // Now, save the transaction
         await tx.save();
-            }
-      await this.updateBalances(); // Update balances after saving transactions
-
+      }
+  
+      // Next, process regular transactions
+      for (let i = 0; i < regularTransactions.length; i++) {
+        const tx = regularTransactions[i];
+        tx.blockHash = this.hash;
+        tx.index_in_block = tokenCreationTransactions.length + i; // Assign the transaction's index
+  
+        await tx.save();
+      }
+  
+      // Update balances after saving transactions
+      await this.updateBalances(regularTransactions);
+  
       const merkleTree = new MerkleTree(
         this.transactions.map((tx) => tx.hash)
       );
   
       await merkleTree.saveNodesToDatabase(this.hash);
-
+  
       // Store Merkle proofs
       for (const tx of this.transactions) {
         const proof = merkleTree.getProof(tx.hash);
         await this.saveMerkleProof(tx.hash, proof);
       }
   
-        return results;
+      return results;
     } catch (err) {
-        if (err.code === 'ER_DUP_ENTRY') {
-        } else {
-            console.error(`Error saving block ${this.index}:`, err);
-            throw err;
-        }
+      if (err.code === 'ER_DUP_ENTRY') {
+        console.error("Duplicate entry detected:", err.message);
+      } else {
+        console.error(`Error saving block ${this.index}:`, err);
+        throw err;
+      }
     }
   }
   
@@ -253,30 +335,52 @@ class Block {
   }
   
 
-  async updateBalances() {
-    for (const tx of this.transactions) {
+  async updateBalances(transactions) {
+    for (const tx of transactions) {
       if (tx.fromAddress) {
-        await this.updateAddressBalance(tx.fromAddress, -tx.amount);
+        await this.updateAddressBalance(tx.fromAddress, -tx.amount, tx.tokenId);
       }
       if (tx.toAddress) {
-        await this.updateAddressBalance(tx.toAddress, tx.amount);
+        await this.updateAddressBalance(tx.toAddress, tx.amount, tx.tokenId);
       }
     }
   }
 
   
 
-  async updateAddressBalance(address, amount) {
-    const query = `
-      INSERT INTO address_balances (address, balance)
-      VALUES (?, ?)
-      ON DUPLICATE KEY UPDATE balance = balance + ?
-    `;
-    try {
-      await db.query(query, [address, amount, amount]);
-    } catch (err) {
-      console.error(`Error updating balance for address ${address}:`, err);
-      throw err;
+  async updateAddressBalance(address, amount, tokenId = null) {
+    if (tokenId === null) {
+      const query = `
+        INSERT INTO address_balances (address, balance)
+        VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE balance = balance + ?
+      `;
+      try {
+        await db.query(query, [address, amount, amount]);
+      } catch (err) {
+        console.error(`Error updating balance for address ${address}:`, err);
+        throw err;
+      }
+    } else {
+      // Ensure the address exists in address_balances
+      const insertAddressQuery = `
+        INSERT INTO address_balances (address, balance)
+        VALUES (?, 0.00000000)
+        ON DUPLICATE KEY UPDATE balance = balance
+      `;
+      await db.query(insertAddressQuery, [address]);
+  
+      const query = `
+        INSERT INTO token_balances (address, token_id, balance)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE balance = balance + ?
+      `;
+      try {
+        await db.query(query, [address, tokenId, amount, amount]);
+      } catch (err) {
+        console.error(`Error updating token balance for address ${address} and token_id ${tokenId}:`, err);
+        throw err;
+      }
     }
   }
 
@@ -297,6 +401,8 @@ class Block {
     }
     return true;
   }
+
 }
 
-export {Block};
+export { Block };
+

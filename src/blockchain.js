@@ -7,9 +7,7 @@ import { broadcastBlock, broadcastChain, broadcastTransaction } from './p2p.js';
 import { acquireLock, releaseLock } from './lock.js';
 import { MerkleTree, MerkleProofPath } from './merkleTree.js';
 import { createNewWallet, loadWallet } from './wallet.js';
-
-
-import Decimal from'decimal.js';
+import Decimal from 'decimal.js';
 
 class Blockchain {
   constructor() {
@@ -50,50 +48,38 @@ class Blockchain {
     }, 10000); // Check every 10 seconds (adjustable)
   }
 
-
   async initializeGenesisBlock() {
-    
     const query = "SELECT * FROM blocks WHERE `index` = 0";
-    
     try {
-        const [rows] = await db.query(query);
-        
-        if (rows.length > 0) {
-            const genesisBlock = await Block.load(rows[0].hash);
-            if (this.chain.length === 0) {
-                this.chain.push(genesisBlock); // Only add to memory if chain is empty
-                console.log(`Genesis block loaded with hash: ${genesisBlock.hash}`);
-            }
-        } else {
-          // No genesis block found in the database
-            if (this.connectedPeers.length > 0) {
-                // If there are connected peers, wait for the full chain to be received
-                console.log("Waiting for chain from peers...");
-                // The chain will be replaced when a FULL_CHAIN message is received
-            } else {
-                // No peers connected; this node should create the genesis block
-                
-                await this.createGenesisBlockWithReward(this.genesisAddress, 1000000);
-            }
+      const [rows] = await db.query(query);
+      if (rows.length > 0) {
+        const genesisBlock = await Block.load(rows[0].hash);
+        if (this.chain.length === 0) {
+          this.chain.push(genesisBlock); // Only add to memory if chain is empty
+          console.log(`Genesis block loaded with hash: ${genesisBlock.hash}`);
         }
+      } else {
+        if (this.connectedPeers.length > 0) {
+          console.log("Waiting for chain from peers...");
+        } else {
+          await this.createGenesisBlockWithReward(this.genesisAddress, 1000000);
+        }
+      }
     } catch (err) {
-        console.error("Error initializing genesis block:", err);
-        throw err;
+      console.error("Error initializing genesis block:", err);
+      throw err;
     }
   }
 
-
-
   // Create the genesis block with a reward transaction
   async createGenesisBlockWithReward(genesisAddress, initialReward) {
-    const rewardTx = new Transaction(null, genesisAddress, initialReward); // Reward transaction
-    rewardTx.hash = rewardTx.calculateHash();
+    const rewardTx = new Transaction(null, genesisAddress, initialReward, Date.now(), null, "", null, ""); // Reward transaction
     rewardTx.signature = null; // Reward transactions don't need a signature
   
     console.log("Creating genesis block...");
     const genesisBlock = new Block(
       0,
-      null, 
+      null,
       Date.now(),
       [rewardTx],
       this.difficulty
@@ -109,7 +95,6 @@ class Blockchain {
       console.log("Saving genesis block to the database...");
       await genesisBlock.save();
       console.log(`Genesis block created with initial balance of ${initialReward} to address ${genesisAddress}`);
-      
     } catch (err) {
       console.error("Error saving genesis block:", err);
       throw err;
@@ -132,10 +117,8 @@ class Blockchain {
 
   // Mine pending transactions and add a new block to the blockchain
   async minePendingTransactions(miningRewardAddress) {
-    // Attempt to acquire a lock before starting mining to prevent concurrent mining
     const lockAcquired = await acquireLock("miningLock");
     if (!lockAcquired) {
-      
       return;
     }
 
@@ -146,9 +129,8 @@ class Blockchain {
 
       console.log("Starting to mine a new block...");
 
-      // **Step 1: Filter Out Transactions Already in the Chain**
-      const filteredTransactions = this.pendingTransactions.filter(tx => 
-        !this.chain.some(block => 
+      const filteredTransactions = this.pendingTransactions.filter(tx =>
+        !this.chain.some(block =>
           block.transactions.some(existingTx => existingTx.hash === tx.hash)
         )
       );
@@ -159,7 +141,6 @@ class Blockchain {
         return;
       }
 
-      // **Step 2: Ensure Uniqueness of Transactions by Their Hash**
       const uniqueTransactionsMap = new Map();
       filteredTransactions.forEach(tx => {
         if (!uniqueTransactionsMap.has(tx.hash)) {
@@ -174,10 +155,8 @@ class Blockchain {
         return;
       }
 
-      // **Step 3: Prepare Transactions for the New Block**
       const blockTransactions = [...uniqueTransactions];
 
-      // **Step 4: Add Mining Reward Transaction**
       if (miningRewardAddress) {
         const rewardTx = new Transaction(
           null, // No sender for mining rewards
@@ -188,8 +167,8 @@ class Blockchain {
         rewardTx.signature = null; // Reward transactions don't need a signature
         blockTransactions.push(rewardTx);
       }
+      
 
-      // **Step 5: Create a New Block with the Collected Transactions**
       const newBlock = new Block(
         this.chain.length,
         this.getLatestBlock().hash,
@@ -198,7 +177,6 @@ class Blockchain {
         this.difficulty
       );
 
-      // **Step 6: Validate Origin Transaction Hash**
       const previousBlock = this.getLatestBlock();
       const expectedOriginTransactionHash = previousBlock.calculateLastOriginTransactionHash();
 
@@ -206,37 +184,50 @@ class Blockchain {
         throw new Error('Previous block has an invalid origin transaction hash');
       }
 
-      // **Step 7: Mine the New Block**
       newBlock.mineBlock(this.difficulty);
 
       console.log(`Mined block successfully with index: ${newBlock.index}`);
       console.log(`Number of transactions mined in block ${newBlock.index}: ${newBlock.transactions.length}`);
 
-      // **Step 8: Add the New Block to the Chain and Save It**
       this.chain.push(newBlock);
       await newBlock.save();
 
-      // **Step 9: Clear Mined Transactions from Pending and the Transaction Pool**
       await this.clearMinedTransactions(newBlock.transactions);
+
       newBlock.transactions.forEach(tx => {
         this.transactionPool.delete(tx.hash);
       });
 
-      // **Step 10: Broadcast the New Block to Peers**
       broadcastBlock(newBlock);
 
-      // **Step 11: Remove Mined Transactions from the In-Memory Pending List**
-      this.pendingTransactions = this.pendingTransactions.filter(tx => 
+      this.pendingTransactions = this.pendingTransactions.filter(tx =>
         !newBlock.transactions.some(newTx => newTx.hash === tx.hash)
       );
     } catch (error) {
       console.error("Error during mining process:", error);
     } finally {
-      // Release the lock regardless of whether mining was successful or not
       await releaseLock("miningLock");
     }
   }
+  
 
+  async migrateTransactionHashes() {
+    const query = "SELECT * FROM transactions";
+    try {
+      const [transactions] = await db.query(query);
+      for (const txData of transactions) {
+        const tx = Transaction.fromJSON(txData);
+        const newHash = tx.calculateHash();
+        if (newHash !== tx.hash) {
+          await db.query("UPDATE transactions SET hash = ? WHERE hash = ?", [newHash, tx.hash]);
+          console.log(`Updated hash for transaction ${tx.hash} to ${newHash}`);
+        }
+      }
+      console.log("Transaction hash migration complete.");
+    } catch (err) {
+      console.error("Error migrating transaction hashes:", err);
+    }
+  }
 
   async handleReceivedTransaction(tx) {
     if (this.transactionPool.has(tx.hash)) {
@@ -275,7 +266,7 @@ class Blockchain {
 
       await this.clearMinedTransactions(newBlock.transactions);
 
-      this.pendingTransactions = this.pendingTransactions.filter(tx => 
+      this.pendingTransactions = this.pendingTransactions.filter(tx =>
         !newBlock.transactions.some(newTx => newTx.hash === tx.hash)
       );
 
@@ -295,9 +286,8 @@ class Blockchain {
     if (!transaction.isValid()) {
       throw new Error("Invalid transaction.");
     }
-    
+
     if (this.transactionPool.has(transaction.hash)) {
-      
       return;
     }
 
@@ -314,7 +304,6 @@ class Blockchain {
   // Replace the current chain with a new chain
   async replaceChain(newChainData) {
     if (this.isReplacingChain) {
-      
       return;
     }
 
@@ -337,20 +326,16 @@ class Blockchain {
 
       if (receivedCumulativeDifficulty > localCumulativeDifficulty) {
         try {
-          // Clear the local database before replacing
           await this.clearLocalBlockchainData();
 
-          // Reset In-Memory Chain
           this.chain = [];
 
-          // Add New Chain
           for (const blockData of newChainData) {
             const newBlock = Block.fromJSON(blockData);
             await newBlock.save();
             this.chain.push(newBlock);
           }
 
-          
           this.isSynchronized = true;
           broadcastChain(); // Notify other peers about the updated chain
         } catch (err) {
@@ -368,104 +353,116 @@ class Blockchain {
     try {
       // Delete all transactions
       await db.query("DELETE FROM transactions");
-  
+
       // Delete all pending transactions
       await db.query("DELETE FROM pending_transactions");
-  
+
       // Delete all Merkle nodes
       await db.query("DELETE FROM merkle_nodes");
-  
+
       // Delete all Merkle proof paths
       await db.query("DELETE FROM merkle_proof_paths");
-  
+
       // Delete all blocks
       await db.query("DELETE FROM blocks");
-  
+
       // Reset address balances
       await db.query("DELETE FROM address_balances");
-  
-      
+
+      // Reset tokens and token_balances
+      await db.query("DELETE FROM token_balances");
+      await db.query("DELETE FROM tokens");
     } catch (err) {
       console.error("Error clearing local blockchain data:", err);
       throw err;
     }
   }
-  
-  
 
   async getBalanceOfAddress(address) {
-    const query = `
-      SELECT balance 
-      FROM address_balances 
+    // Query to fetch native balance
+    const nativeBalanceQuery = `
+      SELECT IFNULL(balance, 0) AS native_balance
+      FROM address_balances
       WHERE address = ?
     `;
-
-
+    
+    // Query to fetch token balances with symbols using the view
+    const tokenBalanceQuery = `
+      SELECT token_id, token_symbol, balance
+      FROM v_token_balances
+      WHERE address = ?
+    `;
+    
     try {
-      const [rows, fields] = await db.query(query, [address]);
-      if (rows.length === 0) {
-        return new Decimal(0).toFixed(8);
-      } else {
-        const balance = rows[0].balance || 0;
-        return new Decimal(balance).toFixed(8);
+      // Fetch Native Balance
+      const [nativeRows] = await db.query(nativeBalanceQuery, [address]);
+      const nativeBalance = nativeRows.length > 0 ? new Decimal(nativeRows[0].native_balance).toFixed(8) : "0.00000000";
+      
+      // Fetch Token Balances with Symbols
+      const [tokenRows] = await db.query(tokenBalanceQuery, [address]);
+      
+      const tokens = {};
+      for (const row of tokenRows) {
+        tokens[row.token_id] = {
+          token_symbol: row.token_symbol,
+          balance: new Decimal(row.balance).toFixed(8)
+        };
       }
+      
+      return {
+        native: nativeBalance,
+        tokens
+      };
     } catch (err) {
       throw err;
     }
   }
+  
 
   // Static method to validate an entire chain
   static async isValidChain(chainData) {
     if (chainData.length === 0) return false;
-  
+
     const firstBlock = chainData[0];
-    // Validate genesis block
     if (firstBlock.index !== 0) {
-        console.log("Invalid genesis block index.");
-        return false;
+      console.log("Invalid genesis block index.");
+      return false;
     }
 
-    // Allow previous_hash to be null or '0' for genesis block
     if (firstBlock.previous_hash !== null && firstBlock.previous_hash !== '0') {
       console.log("Invalid genesis block previous_hash.");
       return false;
     }
-  
-    // Continue with the rest of the validation without early return
+
     for (let i = 1; i < chainData.length; i++) {
       const currentBlock = chainData[i];
       const previousBlock = chainData[i - 1];
-  
-      // Validate previous hash linkage
+
       if (currentBlock.previous_hash !== previousBlock.hash) {
         console.log(`Block ${currentBlock.index} has invalid previous hash.`);
         return false;
       }
-  
-      // Recalculate and verify hash
+
       const tempBlock = Block.fromJSON(currentBlock);
-      if (currentBlock.hash !== tempBlock.calculateHash()) { // Ensure using correct hash calculation method
+      if (currentBlock.hash !== tempBlock.calculateHash()) {
         console.log(`Block ${currentBlock.index} has invalid hash.`);
         return false;
       }
-  
-      // Verify difficulty
+
       if (currentBlock.hash.substring(0, currentBlock.difficulty) !== Array(currentBlock.difficulty + 1).join("0")) {
         console.log(`Block ${currentBlock.index} does not meet difficulty requirements.`);
         return false;
       }
-  
-      // Validate all transactions within the block
+
       const isValidTransactions = await tempBlock.hasValidTransactions();
       if (!isValidTransactions) {
         console.log(`Block ${currentBlock.index} contains invalid transactions.`);
         return false;
       }
     }
-  
+
     return true; // All blocks are valid
   }
-  
 
   /**
    * Verify if a transaction is in the specified block
@@ -499,9 +496,8 @@ class Blockchain {
   async loadChainFromDatabase() {
     const query = "SELECT * FROM blocks ORDER BY `index` ASC";
     try {
-      // Clear the existing chain to prevent duplication
       this.chain = [];
-      
+
       const [rows, fields] = await db.query(query);
       for (const result of rows) {
         const block = await Block.load(result.hash);
@@ -512,16 +508,13 @@ class Blockchain {
 
       if (this.chain.length === 0) {
         if (this.connectedPeers.length > 0) {
-          // No blocks in DB and peers are connected; wait for chain from peers
-          
           return;
         } else {
-          // No blocks and no peers; create genesis block
           console.log("No blocks in DB and no peers connected. Creating genesis block...");
           await this.createGenesisBlockWithReward(this.genesisAddress, 1000000);
         }
       }
-  
+
       if (!await this.isChainValid()) {
         throw new Error("Blockchain is invalid after loading from database.");
       } else {
@@ -548,7 +541,6 @@ class Blockchain {
     const query = "DELETE FROM pending_transactions";
     try {
       await db.query(query);
-  
     } catch (err) {
       console.error("Error clearing pending transactions:", err);
       throw err;
@@ -559,21 +551,18 @@ class Blockchain {
     const transactionHashes = minedTransactions.map(tx => tx.hash);
     if (transactionHashes.length === 0) return;
 
-    const query = `DELETE FROM pending_transactions WHERE hash IN (${transactionHashes.map(() => '?').join(', ')})`;
+    const placeholders = transactionHashes.map(() => '?').join(', ');
+    const query = `DELETE FROM pending_transactions WHERE hash IN (${placeholders})`;
     try {
-        await db.query(query, transactionHashes);
-       
+      await db.query(query, transactionHashes);
     } catch (err) {
-        console.error("Error clearing mined transactions from the database:", err);
-        throw err;
+      console.error("Error clearing mined transactions from the database:", err);
+      throw err;
     }
   }
 
   async validateDatabaseState() {
-    // Fetch all transactions from the blockchain
     const transactions = await this.getAllTransactions();
-
-    // Calculate expected balances
     const calculatedBalances = {};
 
     for (const tx of transactions) {
@@ -588,16 +577,14 @@ class Blockchain {
       }
     }
 
-    // Compare with database balances
     for (const [address, balance] of Object.entries(calculatedBalances)) {
-      // Special handling for "null" address
       if (address === "null") {
         const nullAddressBalance = await this.getBalanceOfAddress("null");
         if (new Decimal(nullAddressBalance).toFixed(8) !== "0.00000000") {
           console.error(`Balance mismatch for null address: expected 0.00000000, found ${nullAddressBalance}`);
           return false;
         }
-        continue; // Skip the "null" address in the general balance check
+        continue;
       }
 
       const dbBalance = await this.getBalanceOfAddress(address);
@@ -605,7 +592,6 @@ class Blockchain {
       if (!balance.equals(new Decimal(dbBalance))) {
         console.error(`Balance mismatch for address ${address}: expected ${balance.toFixed(8)}, found ${dbBalance}`);
 
-        // Fetch transactions from blockchain to identify the cause of discrepancy
         const discrepancyTransactions = transactions.filter(
           (tx) => tx.fromAddress === address || tx.toAddress === address
         );
@@ -623,7 +609,6 @@ class Blockchain {
             Origin Transaction Hash: ${tx.originTransactionHash}`
           );
         });
-        
 
         return false;
       }
@@ -655,13 +640,112 @@ class Blockchain {
     const chainData = this.chain.map(block => block.toJSON());
     return await Blockchain.isValidChain(chainData);
   }
+
+  /**
+   * Create a new token
+   * @param {string} name - Name of the token
+   * @param {string} symbol - Symbol of the token
+   * @param {number} totalSupply - Total supply of the token
+   * @param {string} creatorAddress - Address of the token creator
+   * @returns {object} - Created token details
+   */
+  async createToken(name, symbol, totalSupply, creatorAddress) {
+    // Check if symbol already exists
+    const symbolCheckQuery = "SELECT * FROM tokens WHERE symbol = ?";
+    const [existingTokens] = await db.query(symbolCheckQuery, [symbol]);
+    if (existingTokens.length > 0) {
+      throw new Error("Token symbol already exists.");
+    }
+  
+    // Ensure the creatorAddress exists in address_balances
+    const insertAddressQuery = `
+      INSERT INTO address_balances (address, balance)
+      VALUES (?, 0.00000000)
+      ON DUPLICATE KEY UPDATE balance = balance
+    `;
+    await db.query(insertAddressQuery, [creatorAddress]);
+  
+    // Insert new token
+    const insertTokenQuery = `
+      INSERT INTO tokens (name, symbol, total_supply, creator_address, timestamp)
+      VALUES (?, ?, ?, ?, ?)
+    `;
+    const timestamp = Date.now();
+    const [tokenResult] = await db.query(insertTokenQuery, [name, symbol, totalSupply, creatorAddress, timestamp]);
+  
+    const tokenId = tokenResult.insertId;
+  
+    // Create a transaction for token creation as a reward transaction
+    const tx = new Transaction(null, creatorAddress, totalSupply, timestamp, null, "", null, "");
+    tx.tokenId = tokenId;
+    tx.tokenName = name; // Assign the token name
+    tx.tokenSymbol = symbol; // Assign the token symbol
+    tx.tokenTotalSupply = totalSupply; 
+    tx.signature = null; // Reward transactions don't require a signature
+
+    // Explicitly recalculate hash
+    tx.hash = tx.calculateHash();
+  
+    await this.addPendingTransaction(tx);
+  
+    return {
+      token_id: tokenId,
+      name,
+      symbol,
+      total_supply: totalSupply,
+      creator_address: creatorAddress,
+      timestamp
+    };
+  }
+
+  /**
+   * Transfer tokens from one address to another
+   * @param {string} fromAddress - Sender's address
+   * @param {string} toAddress - Receiver's address
+   * @param {number} amount - Amount to transfer
+   * @param {number} tokenId - ID of the token to transfer
+   */
+  async transferToken(fromAddress, toAddress, amount, tokenId) {
+  // Check if sender has enough tokens
+  const balanceQuery = "SELECT balance FROM token_balances WHERE address = ? AND token_id = ?";
+  const [balanceRows] = await db.query(balanceQuery, [fromAddress, tokenId]);
+
+  if (balanceRows.length === 0 || new Decimal(balanceRows[0].balance).lessThan(amount)) {
+    throw new Error("Insufficient token balance.");
+  }
+
+  // Ensure the receiver's address exists in address_balances
+  const insertToAddressQuery = `
+    INSERT INTO address_balances (address, balance)
+    VALUES (?, 0.00000000)
+    ON DUPLICATE KEY UPDATE balance = balance
+  `;
+  await db.query(insertToAddressQuery, [toAddress]);
+
+  // Retrieve the latest transaction for originTransactionHash
+  const latestTransaction = await Transaction.getLatestTransactionForAddress(fromAddress);
+  const originTransactionHash = latestTransaction ? latestTransaction.hash : null;
+
+  // Create a transaction for token transfer
+  const tx = new Transaction(fromAddress, toAddress, amount, Date.now(), null, null, originTransactionHash, '', null, tokenId);
+  
+  await tx.signWithAddress(fromAddress);
+  await this.addPendingTransaction(tx);
+}
 }
 
+// Instantiate the Blockchain
 const blockchainInstance = new Blockchain();
+
+// Bind createToken and transferToken to the instance
+const createToken = blockchainInstance.createToken.bind(blockchainInstance);
+const transferToken = blockchainInstance.transferToken.bind(blockchainInstance);
 
 export {
   blockchainInstance,
   Blockchain,
   Transaction,
   Block,
+  createToken,
+  transferToken,
 };
