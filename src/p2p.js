@@ -25,6 +25,14 @@ function requestFullChain(ws) {
   }));
 }
 
+function requestPendingTransactionsFromPeers() {
+    sockets.forEach((socket) => {
+      socket.send(JSON.stringify({
+        type: 'REQUEST_PENDING_TRANSACTIONS',
+      }));
+    });
+  }
+
 function initMessageHandler(ws) {
   ws.on('message', async (data) => {
     try {
@@ -36,19 +44,25 @@ function initMessageHandler(ws) {
             break;
         case 'FULL_CHAIN':
           await handleReceivedFullChain(message.data);
-            break;       
+            break;
+        case 'REQUEST_PENDING_TRANSACTIONS':
+            sendPendingTransactions(ws);
+            break;
+        case 'PENDING_TRANSACTIONS':
+          await handleReceivedPendingTransactions(message.data);
+            break;
+        case 'MINING_LOCK':
+          handleMiningLock();
+            break;
+        case 'MINING_UNLOCK':
+          handleMiningUnlock();
+            break;               
         case 'NEW_BLOCK':
           await handleReceivedBlock(message.data);
             break;
         case 'NEW_TRANSACTION':
           await handleReceivedTransaction(message.data, ws);
             break;
-        /*case 'CREATE_TOKEN':
-          await handleCreateToken(message.data, ws);
-            break;
-        case 'TRANSFER_TOKEN':
-          await handleTransferToken(message.data, ws);
-            break;*/
         default:
           console.log('Unknown message type:', message.type);
       }
@@ -74,6 +88,14 @@ function broadcastChain() {
     data: chainData,
   })));
 }
+
+function sendPendingTransactions(socket) {
+    const pendingTxs = blockchainInstance.pendingTransactions.map(tx => tx.toJSON());
+    socket.send(JSON.stringify({
+      type: 'PENDING_TRANSACTIONS',
+      data: pendingTxs,
+    }));
+  }
 
 function sendChain(socket) {
   const chainData = blockchainInstance.chain.map(block => block.toJSON());
@@ -127,6 +149,36 @@ function broadcastTransferToken(transferData, excludeSocket = null) {
         }));
       }
     });
+}
+
+function broadcastMiningLock(excludeSocket = null) {
+  sockets.forEach((socket) => {
+    if (socket !== excludeSocket) {
+      socket.send(JSON.stringify({
+        type: 'MINING_LOCK',
+      }));
+    }
+  });
+}
+
+function broadcastMiningUnlock(excludeSocket = null) {
+  sockets.forEach((socket) => {
+    if (socket !== excludeSocket) {
+      socket.send(JSON.stringify({
+        type: 'MINING_UNLOCK',
+      }));
+    }
+  });
+}
+
+function handleMiningLock() {
+  blockchainInstance.isMiningLocked = true;
+  
+}
+
+function handleMiningUnlock() {
+  blockchainInstance.isMiningLocked = false;
+  
 }
 
 let lastProcessedBlockHash = null;
@@ -194,107 +246,88 @@ async function handleReceivedBlock(receivedBlockData) {
     }
 }
 
+async function handleReceivedPendingTransactions(receivedTxDataArray) {
+    for (const txData of receivedTxDataArray) {
+      const tx = Transaction.fromJSON(txData);
+      try {
+        // Add the transaction to pending transactions if not already present
+        await blockchainInstance.addPendingTransaction(tx);
+      } catch (error) {
+        console.error('Failed to add received pending transaction:', error.message);
+      }
+    }
+  }
+
 
 const processedTransactions = new Set();
 
 async function handleReceivedTransaction(receivedTxData, senderSocket) {
-    const tx = Transaction.fromJSON(receivedTxData);
-  
-    // Check if the transaction has already been processed
-    if (processedTransactions.has(tx.hash)) {
+  const tx = Transaction.fromJSON(receivedTxData);
+
+  // Check if the transaction has already been processed
+  if (processedTransactions.has(tx.hash)) {
+    return;
+  }
+
+  // Check if the transaction already exists in the pending_transactions table
+  const existingTransaction = await Transaction.loadPendingTransactionByHash(tx.hash);
+  if (existingTransaction) {
+    return;
+  }
+
+  // Handle token creation transactions
+  if (tx.tokenId !== null && tx.tokenName && tx.tokenSymbol && tx.tokenTotalSupply) {
+    // **Ensure creator_address exists in address_balances**
+    const insertAddressQuery = `
+      INSERT INTO address_balances (address, balance)
+      VALUES (?, 0.00000000)
+      ON DUPLICATE KEY UPDATE balance = balance
+    `;
+    await db.query(insertAddressQuery, [tx.toAddress]); // tx.toAddress is the creator_address
+
+    // Check if the token already exists in the tokens table
+    const [tokenRows] = await db.query("SELECT * FROM tokens WHERE token_id = ?", [tx.tokenId]);
+    if (tokenRows.length === 0) {
+      // Insert the token into the tokens table
+      const insertTokenQuery = `
+        INSERT INTO tokens (token_id, name, symbol, total_supply, creator_address, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `;
+      const tokenValues = [tx.tokenId, tx.tokenName, tx.tokenSymbol, tx.tokenTotalSupply, tx.toAddress, tx.timestamp];
+      await db.query(insertTokenQuery, tokenValues);
+
+      // Insert the initial token balance for the creator
+      const insertTokenBalanceQuery = `
+        INSERT INTO token_balances (address, token_id, balance)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE balance = balance + ?
+      `;
+      await db.query(insertTokenBalanceQuery, [tx.toAddress, tx.tokenId, tx.amount, tx.amount]);
+    }
+  } else if (tx.tokenId !== null) {
+    // For regular token transactions, ensure the token exists
+    const [tokenRows] = await db.query("SELECT * FROM tokens WHERE token_id = ?", [tx.tokenId]);
+    if (tokenRows.length === 0) {
+      // Token does not exist; cannot process this transaction
+      console.error(`Token ID ${tx.tokenId} not found. Transaction cannot be processed.`);
       return;
     }
-  
-    // Verify if token_id exists if it's a token transaction
-    if (tx.tokenId !== null) {
-      const [tokenRows] = await db.query("SELECT * FROM tokens WHERE token_id = ?", [tx.tokenId]);
-      if (tokenRows.length === 0) {
-        
-        return;
-      }
-    }
-  
-    try {
-      // Check if the transaction already exists in the pending_transactions table
-      const existingTransaction = await Transaction.loadPendingTransactionByHash(tx.hash);
-      
-      if (existingTransaction) {
-        return;
-      }
-  
-      // Add the transaction to pending transactions
-      await blockchainInstance.addPendingTransaction(tx);
-      
-  
-      // Mark the transaction as processed
-      processedTransactions.add(tx.hash);
-  
-      // Broadcast the transaction to other peers, excluding the sender
-      broadcastTransaction(tx, senderSocket);
-    } catch (error) {
-      console.error('Failed to add received transaction:', error.message);
-    }
-}
-  
+  }
 
-async function handleCreateToken(tokenData, senderSocket) {
   try {
-    const { name, symbol, total_supply, creator_address, timestamp, token_id } = tokenData;
+    // Add the transaction to pending transactions
+    await blockchainInstance.addPendingTransaction(tx);
 
-    // Check if token already exists
-    const [rows] = await db.query("SELECT * FROM tokens WHERE token_id = ?", [token_id]);
-    if (rows.length > 0) {
-      return;
-    }
+    // Mark the transaction as processed
+    processedTransactions.add(tx.hash);
 
-    // Insert the token into the database
-    const query = "INSERT INTO tokens (token_id, name, symbol, total_supply, creator_address, timestamp) VALUES (?, ?, ?, ?, ?, ?)";
-    const values = [token_id, name, symbol, total_supply, creator_address, timestamp];
-    await db.query(query, values);
-
-    // Update token_balances
-    const balanceQuery = 
-      `INSERT INTO token_balances (address, token_id, balance)
-       VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE balance = balance + ?`;
-    await db.query(balanceQuery, [creator_address, token_id, total_supply, total_supply]);
-
-    broadcastCreateToken(tokenData, senderSocket);
+    // Broadcast the transaction to other peers, excluding the sender
+    broadcastTransaction(tx, senderSocket);
   } catch (error) {
-    console.error('Failed to handle CREATE_TOKEN:', error.message);
+    console.error('Failed to add received transaction:', error.message);
   }
 }
-
-async function handleTransferToken(transferData, senderSocket) {
-    try {
-      const { fromAddress, toAddress, amount, tokenId, timestamp, hash } = transferData;
   
-      // Check if transaction already exists
-      const [rows] = await db.query("SELECT * FROM transactions WHERE hash = ?", [hash]);
-      if (rows.length > 0) {
-        return;
-      }
-  
-      // **Ensure the receiver's address exists in address_balances**
-      const insertToAddressQuery = 
-        `INSERT INTO address_balances (address, balance)
-         VALUES (?, 0.00000000)
-         ON DUPLICATE KEY UPDATE balance = balance`;
-      await db.query(insertToAddressQuery, [toAddress]);
-  
-      // Create and save the transaction
-      const tx = new Transaction(fromAddress, toAddress, amount, timestamp, null, null, null, '', null, tokenId);
-      tx.hash = hash;
-      await tx.save();
-  
-      // **Do not update token balances here**
-      // The balances will be updated during block mining
-  
-      broadcastTransferToken(transferData, senderSocket);
-    } catch (error) {
-      console.error('Failed to handle TRANSFER_TOKEN:', error.message);
-    }
-}
 
 async function handleFullChainRequest(ws) {
   const chainData = blockchainInstance.chain.map(block => block.toJSON());
@@ -388,4 +421,7 @@ export {
   broadcastTransaction,
   broadcastCreateToken,
   broadcastTransferToken,
+  requestPendingTransactionsFromPeers, 
+  broadcastMiningLock,
+  broadcastMiningUnlock,
 };

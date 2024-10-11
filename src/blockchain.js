@@ -1,13 +1,20 @@
 "use strict";
 
+import crypto from 'crypto';
 import { db } from './db.js';
 import { Transaction } from './transaction.js';
 import { Block } from './block.js';
-import { broadcastBlock, broadcastChain, broadcastTransaction } from './p2p.js';
+import { broadcastBlock, broadcastChain, broadcastTransaction, requestPendingTransactionsFromPeers, broadcastMiningLock, broadcastMiningUnlock } from './p2p.js';
 import { acquireLock, releaseLock } from './lock.js';
 import { MerkleTree, MerkleProofPath } from './merkleTree.js';
 import { createNewWallet, loadWallet } from './wallet.js';
 import Decimal from 'decimal.js';
+
+function generateTokenId(name, symbol, creatorAddress, timestamp) {
+  const tokenDataString = `${name}:${symbol}:${creatorAddress}:${timestamp}`;
+  const tokenIdHash = crypto.createHash('sha256').update(tokenDataString).digest('hex');
+  return tokenIdHash.slice(0, 16); // Adjust length as needed
+}
 
 class Blockchain {
   constructor() {
@@ -26,8 +33,10 @@ class Blockchain {
     this.connectedPeers = [];
 
     this.isReplacingChain = false;
+    this.isMiningLocked = false; 
 
     Blockchain.instance = this;
+    
   }
 
   setConnectedPeers(peers) {
@@ -41,10 +50,8 @@ class Blockchain {
     this.isSynchronized = true;
 
     setInterval(async () => {
-      const pendingTxCount = await this.countPendingTransactions();
-      if (pendingTxCount > 0) {
-        await this.minePendingTransactions(this.getMinerAddress());
-      }
+      // Synchronize pending transactions with peers
+      requestPendingTransactionsFromPeers();
     }, 10000); // Check every 10 seconds (adjustable)
   }
 
@@ -107,40 +114,95 @@ class Blockchain {
   }
 
   // Start the time-based mining process
-  startTimeBasedMining(intervalInSeconds) {
-    setInterval(async () => {
-      if (this.pendingTransactions.length > 0) {
-        await this.minePendingTransactions(this.getMinerAddress());
-      }
-    }, intervalInSeconds * 1000);
+  startTimeBasedMining() {
+    const intervalInMs = 30 * 1000; // 30 seconds in milliseconds
+
+    // Calculate the time until the next 0 or 30-second mark
+    const now = new Date();
+    const seconds = now.getSeconds();
+    let timeUntilNextInterval;
+
+    if (seconds < 30) {
+      // Time until the 30th second
+      timeUntilNextInterval = (30 - seconds) * 1000 - now.getMilliseconds();
+    } else {
+      // Time until the next minute's first second
+      timeUntilNextInterval = (60 - seconds) * 1000 - now.getMilliseconds();
+    }
+
+    setTimeout(() => {
+      // First mining check at the first second or 30th second
+      this.miningCheck();
+
+      // Set interval thereafter to run every 30 seconds
+      setInterval(() => {
+        this.miningCheck();
+      }, intervalInMs);
+    }, timeUntilNextInterval);
+
+  }
+
+  async miningCheck() {
+    
+  
+    if (this.isMiningLocked) {
+      
+      return;
+    }
+  
+    if (this.pendingTransactions.length > 0) {
+      
+      await this.minePendingTransactions(this.getMinerAddress());
+    } else {
+      
+    }
   }
 
   // Mine pending transactions and add a new block to the blockchain
   async minePendingTransactions(miningRewardAddress) {
-    const lockAcquired = await acquireLock("miningLock");
-    if (!lockAcquired) {
+    if (this.isMiningLocked) {
+      
       return;
     }
-
+  
+    // Introduce a random delay between 0 and 500 milliseconds
+    const randomDelay = Math.floor(Math.random() * 5000);
+    await new Promise(resolve => setTimeout(resolve, randomDelay));
+  
+    // Re-check the lock after the delay
+    if (this.isMiningLocked) {
+      
+      return;
+    }
+  
+    const lockAcquired = await acquireLock("miningLock");
+    if (!lockAcquired) {
+      
+      return;
+    }
+  
+    // Broadcast mining lock to other nodes
+    this.isMiningLocked = true;
+    broadcastMiningLock();
+  
     try {
       if (this.pendingTransactions.length === 0) {
         return;
       }
-
-      console.log("Starting to mine a new block...");
-
+  
+  
       const filteredTransactions = this.pendingTransactions.filter(tx =>
         !this.chain.some(block =>
           block.transactions.some(existingTx => existingTx.hash === tx.hash)
         )
       );
-
+  
       if (filteredTransactions.length === 0) {
         this.pendingTransactions = [];
         await this.clearPendingTransactions();
         return;
       }
-
+  
       const uniqueTransactionsMap = new Map();
       filteredTransactions.forEach(tx => {
         if (!uniqueTransactionsMap.has(tx.hash)) {
@@ -148,15 +210,25 @@ class Blockchain {
         }
       });
       const uniqueTransactions = Array.from(uniqueTransactionsMap.values());
-
+  
       if (uniqueTransactions.length === 0) {
         this.pendingTransactions = [];
         await this.clearPendingTransactions();
         return;
       }
-
+  
       const blockTransactions = [...uniqueTransactions];
-
+  
+      // **Reorder transactions: Token creation transactions first**
+      blockTransactions.sort((a, b) => {
+        const isATokenCreation = a.tokenId && a.tokenName && a.tokenSymbol && a.tokenTotalSupply;
+        const isBTokenCreation = b.tokenId && b.tokenName && b.tokenSymbol && b.tokenTotalSupply;
+  
+        if (isATokenCreation && !isBTokenCreation) return -1;
+        if (!isATokenCreation && isBTokenCreation) return 1;
+        return 0; // Maintain original order if both are token creation or both are not
+      });
+  
       if (miningRewardAddress) {
         const rewardTx = new Transaction(
           null, // No sender for mining rewards
@@ -167,8 +239,7 @@ class Blockchain {
         rewardTx.signature = null; // Reward transactions don't need a signature
         blockTransactions.push(rewardTx);
       }
-      
-
+  
       const newBlock = new Block(
         this.chain.length,
         this.getLatestBlock().hash,
@@ -176,30 +247,30 @@ class Blockchain {
         blockTransactions,
         this.difficulty
       );
-
+  
       const previousBlock = this.getLatestBlock();
       const expectedOriginTransactionHash = previousBlock.calculateLastOriginTransactionHash();
-
+  
       if (previousBlock.originTransactionHash !== expectedOriginTransactionHash) {
         throw new Error('Previous block has an invalid origin transaction hash');
       }
-
+  
       newBlock.mineBlock(this.difficulty);
-
+  
       console.log(`Mined block successfully with index: ${newBlock.index}`);
       console.log(`Number of transactions mined in block ${newBlock.index}: ${newBlock.transactions.length}`);
-
+  
       this.chain.push(newBlock);
       await newBlock.save();
-
+  
       await this.clearMinedTransactions(newBlock.transactions);
-
+  
       newBlock.transactions.forEach(tx => {
         this.transactionPool.delete(tx.hash);
       });
-
+  
       broadcastBlock(newBlock);
-
+  
       this.pendingTransactions = this.pendingTransactions.filter(tx =>
         !newBlock.transactions.some(newTx => newTx.hash === tx.hash)
       );
@@ -207,8 +278,11 @@ class Blockchain {
       console.error("Error during mining process:", error);
     } finally {
       await releaseLock("miningLock");
+      this.isMiningLocked = false;
+      broadcastMiningUnlock();
     }
   }
+  
   
 
   async migrateTransactionHashes() {
@@ -665,25 +739,26 @@ class Blockchain {
     `;
     await db.query(insertAddressQuery, [creatorAddress]);
   
-    // Insert new token
-    const insertTokenQuery = `
-      INSERT INTO tokens (name, symbol, total_supply, creator_address, timestamp)
-      VALUES (?, ?, ?, ?, ?)
-    `;
     const timestamp = Date.now();
-    const [tokenResult] = await db.query(insertTokenQuery, [name, symbol, totalSupply, creatorAddress, timestamp]);
   
-    const tokenId = tokenResult.insertId;
+    // Generate a deterministic tokenId
+    const tokenId = generateTokenId(name, symbol, creatorAddress, timestamp);
   
-    // Create a transaction for token creation as a reward transaction
+    // Insert the token into the tokens table
+    const insertTokenQuery = `
+      INSERT INTO tokens (token_id, name, symbol, total_supply, creator_address, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `;
+    const tokenValues = [tokenId, name, symbol, totalSupply, creatorAddress, timestamp];
+    await db.query(insertTokenQuery, tokenValues);
+  
+    // Create a transaction for token creation
     const tx = new Transaction(null, creatorAddress, totalSupply, timestamp, null, "", null, "");
     tx.tokenId = tokenId;
-    tx.tokenName = name; // Assign the token name
-    tx.tokenSymbol = symbol; // Assign the token symbol
-    tx.tokenTotalSupply = totalSupply; 
+    tx.tokenName = name;
+    tx.tokenSymbol = symbol;
+    tx.tokenTotalSupply = totalSupply;
     tx.signature = null; // Reward transactions don't require a signature
-
-    // Explicitly recalculate hash
     tx.hash = tx.calculateHash();
   
     await this.addPendingTransaction(tx);
@@ -694,9 +769,10 @@ class Blockchain {
       symbol,
       total_supply: totalSupply,
       creator_address: creatorAddress,
-      timestamp
+      timestamp,
     };
   }
+  
 
   /**
    * Transfer tokens from one address to another

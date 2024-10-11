@@ -171,6 +171,7 @@ class Transaction {
       this.tokenSymbol, // New field
       this.tokenTotalSupply // New field
     ];
+    
   
     try {
       const [results] = await db.query(query, values);

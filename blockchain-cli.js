@@ -776,28 +776,27 @@ async function transferTokensCLI() {
       return;
     }
 
-    const tokenIdInput = await askQuestion("Enter token ID: ");
+    const tokenSymbolInput = await askQuestion("Enter token symbol: ");
     const amountInput = await askQuestion("Enter amount to transfer: ");
 
-    const tokenId = parseInt(tokenIdInput, 10);
     const amount = parseFloat(amountInput);
 
-    if (isNaN(tokenId) || isNaN(amount) || amount <= 0) {
-      console.log("Invalid token ID or amount.");
+    if (!tokenSymbolInput || isNaN(amount) || amount <= 0) {
+      console.log("Invalid token symbol or amount.");
       return;
     }
 
     // **Check if Token Exists**
-    const tokenExistsQuery = "SELECT * FROM tokens WHERE token_id = ?";
-    const [tokenRows] = await db.query(tokenExistsQuery, [tokenId]);
+    const tokenExistsQuery = "SELECT * FROM tokens WHERE LOWER(symbol) = LOWER(?)";
+    const [tokenRows] = await db.query(tokenExistsQuery, [tokenSymbolInput]);
 
     if (tokenRows.length === 0) {
-      console.log(`Token with ID ${tokenId} does not exist.`);
+      console.log(`Token with symbol '${tokenSymbolInput}' does not exist.`);
       return;
     }
 
-    // Fetch the token symbol
-    const tokenSymbol = tokenRows[0].symbol; // Adjust if the field name differs
+    const tokenId = tokenRows[0].token_id;
+    const tokenSymbol = tokenRows[0].symbol;
 
     console.log("Fetching sender's token balance...");
     const senderBalanceObj = await blockchainInstance.getBalanceOfAddress(fromAddress);
