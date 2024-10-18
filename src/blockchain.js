@@ -9,6 +9,9 @@ import { acquireLock, releaseLock } from './lock.js';
 import { MerkleTree, MerkleProofPath } from './merkleTree.js';
 import { createNewWallet, loadWallet } from './wallet.js';
 import Decimal from 'decimal.js';
+import fs from 'fs';
+import path from 'path';
+import smartContractRunner from './smartContractRunner.js';
 
 function generateTokenId(name, symbol, creatorAddress, timestamp) {
   const tokenDataString = `${name}:${symbol}:${creatorAddress}:${timestamp}`;
@@ -34,6 +37,7 @@ class Blockchain {
 
     this.isReplacingChain = false;
     this.isMiningLocked = false; 
+    this.smartContractRunner = smartContractRunner;
 
     Blockchain.instance = this;
     
@@ -808,6 +812,63 @@ class Blockchain {
   await tx.signWithAddress(fromAddress);
   await this.addPendingTransaction(tx);
 }
+
+async interactWithContract(fromAddress, contractId, method, params, gasLimit, keyPair) {
+  try {
+    // Retrieve the latest transaction hash for originTransactionHash
+    const latestTransaction = await Transaction.getLatestTransactionForAddress(fromAddress);
+    const originTransactionHash = latestTransaction ? latestTransaction.hash : null;
+
+    // Create a transaction targeting the contract
+    const tx = new Transaction(
+      fromAddress,       // fromAddress
+      null,              // toAddress (null for contract interactions)
+      0,                 // amount
+      Date.now(),        // timestamp
+      null,              // signature (to be set)
+      null,              // blockHash
+      originTransactionHash, // originTransactionHash
+      keyPair.getPublic('hex'), // publicKey
+      null,              // index_in_block
+      null,              // tokenId
+      null,              // tokenName
+      null,              // tokenSymbol
+      null,              // tokenTotalSupply
+      contractId,        // contractId
+      method,            // method
+      params,            // params
+      null               // result
+    );
+    
+    // Sign the transaction
+    await tx.signWithKeyPair(keyPair);
+    
+    // Add the signed transaction to pending transactions
+    await blockchainInstance.addPendingTransaction(tx);
+    
+  } catch (error) {
+    console.error("Error interacting with smart contract:", error.message);
+  }
+}
+
+async listSmartContractMethods(contractId) {
+  // Fetch the smart contract's WASM code from the database
+  const query = "SELECT code FROM smart_contracts WHERE contract_id = ?";
+  const [rows] = await db.query(query, [contractId]);
+
+  if (rows.length === 0) {
+      throw new Error(`Smart contract with ID ${contractId} not found.`);
+  }
+
+  const wasmCode = rows[0].code;
+
+  // Use the updated SmartContractRunner to get available methods
+  const methods = await this.smartContractRunner.getAvailableMethods(wasmCode);
+
+  return methods;
+}
+
+
 }
 
 // Instantiate the Blockchain
@@ -825,3 +886,8 @@ export {
   createToken,
   transferToken,
 };
+
+
+  
+  
+

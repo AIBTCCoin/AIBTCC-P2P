@@ -7,6 +7,8 @@ import crypto from 'crypto';
 import util from 'util';
 import Decimal from 'decimal.js';
 import { initP2PServer, broadcastBlock, broadcastChain, broadcastTransaction } from './src/p2p.js';
+import path from 'path';
+import fs from 'fs/promises';
 
 
 const rl = readline.createInterface({
@@ -17,6 +19,7 @@ const rl = readline.createInterface({
 async function askQuestion(query) {
   return new Promise((resolve) => rl.question(query, resolve));
 }
+
 
 async function main() {
   console.log("Blockchain CLI is starting...");
@@ -59,7 +62,11 @@ async function main() {
     10. Verify Merkle proof by transaction hash 
     11. Create a new token 
     12. Transfer tokens
-    13. Exit
+    13. Deploy a smart contract
+    14. Interact with a smart contract
+    15. List available methods of a smart contract
+    16. Get smart contract state
+    17. Exit
     `);
 
     const choice = await askQuestion("Select an option: ");
@@ -102,6 +109,18 @@ async function main() {
         await transferTokensCLI();
         break;
       case "13":
+        await deploySmartContractCLI();
+        break;
+      case "14":
+        await interactWithSmartContractCLI();
+        break;  
+      case "15":
+        await listSmartContractMethodsCLI();
+        break; 
+      case "16":
+        await getSmartContractStateCLI();
+        break;   
+      case "17":
         console.log("Exiting...");
         rl.close();
         return;  
@@ -839,6 +858,175 @@ async function transferTokensCLI() {
     console.error("Error in transferTokensCLI:", error.message);
   }
 }
+
+async function deploySmartContractCLI() {
+  const creatorAddress = await askQuestion("Enter your wallet address: ");
+  const privateKey = await askQuestion("Enter your private key: "); // New prompt for signing
+
+  if (!privateKey || privateKey.length !== 64) {
+    console.log("Invalid private key.");
+    return;
+  }
+
+  try {
+    const keyPair = ec.keyFromPrivate(privateKey);
+    const publicKey = keyPair.getPublic('hex');
+    const derivedAddress = crypto.createHash('sha256').update(Buffer.from(publicKey, 'hex')).digest('hex').slice(0, 30);
+
+    if (derivedAddress !== creatorAddress) {
+      console.log("Private key does not correspond to the provided address.");
+      return;
+    }
+
+    console.log("Private key validated successfully.");
+
+    let contractPathInput = await askQuestion("Enter path to smart contract WASM file: ");
+    contractPathInput = contractPathInput.trim().replace(/^"|"$/g, '').replace(/^'|'$/g, '');
+    const resolvedPath = path.resolve(contractPathInput);
+    console.log(`Resolved contract path: ${resolvedPath}`);
+
+    // Validate the smart contract WASM file exists
+    try {
+      await fs.access(resolvedPath);
+      console.log("Smart contract WASM file exists and is accessible.");
+    } catch (err) {
+      console.log("Smart contract WASM file does not exist at the provided path.");
+      console.error("Error details:", err.message);
+      return;
+    }
+
+    // Read the WASM file
+    const wasmCode = await fs.readFile(resolvedPath, 'base64'); // Encode as base64
+
+    // Create a deployment transaction
+    const tx = new Transaction(
+      creatorAddress, // fromAddress
+      null,           // toAddress (null or system address for deployments)
+      0,              // amount
+      Date.now(),     // timestamp
+      null,           // signature (to be set)
+      null,           // blockHash
+      null,           // originTransactionHash
+      publicKey,      // publicKey
+      null,           // index_in_block
+      null,           // tokenId
+      null,           // tokenName
+      null,           // tokenSymbol
+      null,           // tokenTotalSupply
+      null,           // contractId (to be set by the contract runner or system)
+      'deploy',       // method
+      { wasmCode, initialState: {} }, // params
+      null            // result
+    );
+
+    // Sign the transaction
+    await tx.signWithKeyPair(keyPair);
+
+    // Add the deployment transaction to pending transactions
+    await blockchainInstance.addPendingTransaction(tx);
+
+    console.log("Smart contract deployment transaction submitted successfully.");
+    console.log(`Transaction Hash: ${tx.hash}`);
+  } catch (error) {
+    if (error.code === 'ER_DATA_TOO_LONG') {
+      console.error("Error deploying smart contract: The smart contract code exceeds the allowed size in the database.");
+      console.error("Consider increasing the 'code' column size or storing the contract as a file path.");
+    } else if (error.code === 'ER_NO_REFERENCED_ROW_2') { // Foreign key constraint
+      console.error("Error deploying smart contract: The creator address does not exist in address_balances.");
+      console.error("Ensure that the address is correct and has been initialized.");
+    } else {
+      console.error("Error deploying smart contract:", error.message);
+    }
+  }
+}
+
+
+async function interactWithSmartContractCLI() {
+  const fromAddress = await askQuestion("Enter your wallet address: ");
+  const contractIdInput = await askQuestion("Enter contract ID: ");
+  const method = await askQuestion("Enter method to invoke: ");
+  const paramsInput = await askQuestion("Enter parameters as JSON: ");
+  const gasLimitInput = await askQuestion("Enter gas limit: ");
+  const privateKey = await askQuestion("Enter your private key: "); // New prompt
+
+  const contractId = parseInt(contractIdInput, 10);
+  let params;
+  try {
+    params = JSON.parse(paramsInput);
+  } catch (error) {
+    console.log("Invalid JSON for parameters.");
+    return;
+  }
+
+  const gasLimit = parseInt(gasLimitInput, 10);
+  if (isNaN(gasLimit) || gasLimit <= 0) {
+    console.log("Invalid gas limit.");
+    return;
+  }
+
+  if (!privateKey || privateKey.length !== 64) {
+    console.log("Invalid private key.");
+    return;
+  }
+
+  try {
+    const keyPair = ec.keyFromPrivate(privateKey);
+    const publicKey = keyPair.getPublic('hex');
+    const derivedAddress = crypto.createHash('sha256').update(Buffer.from(publicKey, 'hex')).digest('hex').slice(0, 30);
+
+    if (derivedAddress !== fromAddress) {
+      console.log("Private key does not correspond to the provided address.");
+      return;
+    }
+
+    console.log("Private key validated successfully.");
+
+    await blockchainInstance.interactWithContract(fromAddress, contractId, method, params, gasLimit, keyPair);
+    console.log("Contract interaction transaction submitted.");
+  } catch (error) {
+    console.error("Error interacting with smart contract:", error.message);
+  }
+}
+
+async function listSmartContractMethodsCLI() {
+  const contractIdInput = await askQuestion("Enter contract ID: ");
+  const contractId = parseInt(contractIdInput, 10);
+  
+  try {
+    const methods = await blockchainInstance.listSmartContractMethods(contractId);
+    console.log(`Available methods for contract ID ${contractId}:`);
+    methods.forEach(method => {
+      console.log(`- ${method}`);
+    });
+  } catch (error) {
+    console.error("Error listing smart contract methods:", error.message);
+  }
+}
+
+async function getSmartContractStateCLI() {
+  const contractIdInput = await askQuestion("Enter contract ID: ");
+  const contractId = parseInt(contractIdInput, 10);
+
+  try {
+    // Fetch the current state from the database
+    const query = "SELECT state FROM smart_contracts WHERE contract_id = ?";
+    const [rows] = await db.query(query, [contractId]);
+
+    if (rows.length === 0) {
+      console.log(`Smart contract with ID ${contractId} not found.`);
+      return;
+    }
+
+    const state = rows[0].state;
+    console.log(`Current state of smart contract ID ${contractId}:`, state);
+  } catch (error) {
+    console.error("Error fetching smart contract state:", error.message);
+  }
+}
+
+
+
+
 
 
 

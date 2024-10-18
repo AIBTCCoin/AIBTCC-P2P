@@ -5,6 +5,7 @@ import { db } from './db.js';
 import { Transaction } from './transaction.js';
 import { MerkleTree, MerkleProofPath } from './merkleTree.js';
 import Decimal from 'decimal.js';
+import smartContractRunner from './smartContractRunner.js';
 
 class Block {
   constructor(index, previousHash, timestamp, transactions, difficulty) {
@@ -151,16 +152,17 @@ class Block {
     `;
     const values = [
       this.hash,
-      this.previousHash,
+      this.previousHash || null,
       this.timestamp,
       this.nonce,
       this.difficulty,
       this.merkleRoot,
       this.index,
-      this.originTransactionHash
+      this.originTransactionHash || null 
     ];
     
     try {
+      // Insert the block into the blocks table
       const [results] = await db.query(query, values);
   
       // Separate transactions into token creation and regular transactions
@@ -171,16 +173,16 @@ class Block {
         !(tx.tokenId && tx.tokenName && tx.tokenSymbol && tx.tokenTotalSupply)
       );
   
-      // First, process token creation transactions
+      // Process token creation transactions
       for (let i = 0; i < tokenCreationTransactions.length; i++) {
         const tx = tokenCreationTransactions[i];
         tx.blockHash = this.hash;
         tx.index_in_block = i; // Assign the transaction's index
   
-        // **Ensure creator_address exists in address_balances**
+        // Ensure creator_address exists in address_balances
         const insertAddressQuery = `
-          INSERT INTO address_balances (address, balance)
-          VALUES (?, 0.00000000)
+          INSERT INTO address_balances (address, balance) 
+          VALUES (?, 0.00000000) 
           ON DUPLICATE KEY UPDATE balance = balance
         `;
         await db.query(insertAddressQuery, [tx.toAddress]);
@@ -194,7 +196,7 @@ class Block {
             total_supply, 
             creator_address, 
             timestamp
-          ) VALUES (?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?) 
           ON DUPLICATE KEY UPDATE 
             name = VALUES(name), 
             symbol = VALUES(symbol), 
@@ -212,37 +214,57 @@ class Block {
         ];
         const [tokenResult] = await db.query(insertTokenQuery, tokenValues);
   
-        // Check if the token was newly created
+        // If the token was newly created, update the token balance
         if (tokenResult.affectedRows === 1) { // Token was inserted
-          // Insert the token balance for the creator
           const insertTokenBalanceQuery = `
             INSERT INTO token_balances (address, token_id, balance)
-            VALUES (?, ?, ?)
-            ON DUPLICATE KEY UPDATE balance = balance
+            VALUES (?, ?, ?) 
+            ON DUPLICATE KEY UPDATE balance = balance + ?
           `;
-          await db.query(insertTokenBalanceQuery, [tx.toAddress, tx.tokenId, tx.amount]);
-          
+          await db.query(insertTokenBalanceQuery, [tx.toAddress, tx.tokenId, tx.amount, tx.amount]);
         } else {
-          // Token already exists; do not update the balance to prevent duplication
+          // Token already exists; skip balance update to prevent duplication
           console.log(`Token ID ${tx.tokenId} already exists. Skipping balance update.`);
         }
   
-        // Now, save the transaction
+        // Save the transaction
         await tx.save();
+  
+        // Handle smart contract interactions if applicable
+        if (tx.method === 'deploy' || (tx.contractId && tx.method)) {
+          await this.handleSmartContractInteraction(tx);
+        }
       }
   
-      // Next, process regular transactions
+      // Process regular transactions
       for (let i = 0; i < regularTransactions.length; i++) {
         const tx = regularTransactions[i];
         tx.blockHash = this.hash;
         tx.index_in_block = tokenCreationTransactions.length + i; // Assign the transaction's index
+
+        if (tx.fromAddress) {
+          const insertFromAddressQuery = `
+            INSERT INTO address_balances (address, balance)
+            VALUES (?, 0.00000000)
+            ON DUPLICATE KEY UPDATE balance = balance
+          `;
+          await db.query(insertFromAddressQuery, [tx.fromAddress]);
+        }
   
+        // Save the transaction
         await tx.save();
+        
+  
+        // Handle smart contract interactions if applicable
+        if (tx.method === 'deploy' || (tx.contractId && tx.method)) {
+          await this.handleSmartContractInteraction(tx);
+        }
       }
   
       // Update balances after saving transactions
       await this.updateBalances(regularTransactions);
   
+      // Handle Merkle Tree and proofs
       const merkleTree = new MerkleTree(
         this.transactions.map((tx) => tx.hash)
       );
@@ -265,6 +287,134 @@ class Block {
       }
     }
   }
+  
+  // Helper method to handle smart contract interactions
+  async handleSmartContractInteraction(tx) {
+    try {
+      if (tx.method === 'deploy') {
+        await this.deploySmartContractTransaction(tx);
+      } else if (tx.contractId && tx.method) {
+        await this.executeSmartContractMethod(tx);
+      }
+    } catch (error) {
+      console.error(`Error handling smart contract interaction for transaction ${tx.hash}:`, error.message);
+      throw error; // Optionally, implement rollback mechanisms here
+    }
+  }
+  
+  async executeSmartContractMethod(tx) {
+    const [contractRows] = await db.query("SELECT * FROM smart_contracts WHERE contract_id = ?", [tx.contractId]);
+    if (contractRows.length === 0) {
+      throw new Error(`Smart contract with ID ${tx.contractId} not found.`);
+    }
+  
+    const contractData = contractRows[0];
+    let state = null;
+    if (contractData.state) {
+      try {
+        state = typeof contractData.state === 'string' ? JSON.parse(contractData.state) : contractData.state;
+      } catch (error) {
+        console.error(`Failed to parse state for contract ID ${tx.contractId}:`, error.message);
+        throw new Error(`Invalid state format for contract ID ${tx.contractId}.`);
+      }
+    }
+  
+    // Execute the smart contract method
+    const { result, updatedState } = await smartContractRunner.executeMethod(
+      Buffer.from(contractData.code, 'base64'), // Decode WASM code from base64
+      tx.method,
+      tx.params,
+      tx.hash,
+      state
+    );
+  
+    // Ensure updatedState is an object
+    if (typeof updatedState !== 'object' || updatedState === null) {
+      console.error(`Invalid updatedState returned by smart contract for transaction ${tx.hash}:`, updatedState);
+      throw new Error(`Smart contract returned invalid state for transaction ${tx.hash}.`);
+    }
+  
+    // Properly serialize updatedState before storing
+    const serializedState = JSON.stringify(updatedState);
+  
+    // Debugging Logs
+    console.log("Updated State Object:", updatedState);
+    console.log("Serialized Updated State:", serializedState);
+  
+    // Update contract state
+    await db.query("UPDATE smart_contracts SET state = ? WHERE contract_id = ?", [serializedState, tx.contractId]);
+  
+    // Save the smart contract transaction result
+    const scTxQuery = `
+      INSERT INTO smart_contract_transactions (transaction_hash, contract_id, method, params, result)
+      VALUES (?, ?, ?, ?, ?)
+    `;
+    const scTxValues = [
+      tx.hash,
+      tx.contractId,
+      tx.method,
+      JSON.stringify(tx.params),
+      JSON.stringify(result),
+    ];
+    await db.query(scTxQuery, scTxValues);
+  
+    console.log(`Smart contract method '${tx.method}' executed successfully for transaction ${tx.hash}.`);
+  }
+  
+  // Add a new method to handle 'deploy' transactions
+  async deploySmartContractTransaction(tx) {
+    try {
+      console.log(`Deploying smart contract from transaction ${tx.hash}`);
+  
+      // Extract necessary details from the transaction
+      const { params } = tx;
+      const { wasmCode, initialState } = params;
+  
+      if (!wasmCode) {
+        throw new Error('WASM code missing in deployment transaction.');
+      }
+  
+      // Initialize the smart contract's state
+      const state = initialState || {};
+  
+      // Insert into smart_contracts table
+      const insertContractQuery = `
+        INSERT INTO smart_contracts (code, state, creator_address, timestamp)
+        VALUES (?, ?, ?, ?)
+      `;
+      const contractValues = [
+        Buffer.from(wasmCode, 'base64'), // Store WASM code as binary
+        JSON.stringify(state),
+        tx.fromAddress,
+        tx.timestamp,
+      ];
+      const [result] = await db.query(insertContractQuery, contractValues);
+  
+      const contractId = result.insertId;
+      console.log(`Smart contract deployed successfully with ID ${contractId}.`);
+  
+      // Insert into smart_contract_transactions table
+      const scTxQuery = `
+        INSERT INTO smart_contract_transactions (transaction_hash, contract_id, method, params, result)
+        VALUES (?, ?, ?, ?, ?)
+      `;
+      const scTxValues = [
+        tx.hash,
+        contractId,
+        'deploy',
+        JSON.stringify(tx.params),
+        null // Assuming no result for deployment
+      ];
+      await db.query(scTxQuery, scTxValues);
+  
+      console.log(`Smart contract deployment transaction processed successfully.`);
+    } catch (error) {
+      console.error(`Error processing deployment transaction ${tx.hash}:`, error.message);
+      throw error; // Re-throw to ensure the block processing is aware of the failure
+    }
+  }
+
+  
   
 
   async saveMerkleProof(transactionHash, proof) {
@@ -405,4 +555,6 @@ class Block {
 }
 
 export { Block };
+
+
 

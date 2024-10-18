@@ -11,9 +11,12 @@
     "start-node1": "cross-env DATABASE_NAME=blockchain1 P2P_PORT=6001 node blockchain-cli.js",
     "start-node2": "cross-env DATABASE_NAME=blockchain2 P2P_PORT=6002 PEERS=ws://localhost:6001 node blockchain-cli.js",
     "start-node3": "cross-env DATABASE_NAME=blockchain3 P2P_PORT=6003 PEERS=ws://localhost:6001,ws://localhost:6002 node blockchain-cli.js",
-    "test": "mocha 'tests/**/*.test.js'"
+    "test": "mocha 'tests/**/*.test.js'",
+    "start": "node server.js"
   },
   "dependencies": {
+    "@wasmer/sdk": "github:wasmerio/wasmer-js",
+    "@wasmer/wasmfs": "^0.12.0",
     "bcryptjs": "^2.4.3",
     "body-parser": "^1.20.3",
     "bs58": "^6.0.0",

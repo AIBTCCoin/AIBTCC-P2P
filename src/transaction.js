@@ -29,7 +29,11 @@ class Transaction {
     tokenId = null, // New parameter for token ID
     tokenName = null, // New field
     tokenSymbol = null, // New field
-    tokenTotalSupply = null // New field
+    tokenTotalSupply = null, // New field
+    contractId = null, // Existing
+    method = null,     // Existing
+    params = null,     // Existing
+    result = null      // New field to store execution result
   ) {
     this.fromAddress = fromAddress; // Address sending the funds
     this.toAddress = toAddress; // Address receiving the funds
@@ -45,6 +49,10 @@ class Transaction {
     this.tokenName = tokenName; // Initialize new fields
     this.tokenSymbol = tokenSymbol;
     this.tokenTotalSupply = tokenTotalSupply;
+    this.contractId = contractId;
+    this.method = method;
+    this.params = params;
+    this.result = result;
   }
 
   toJSON() {
@@ -63,6 +71,10 @@ class Transaction {
       tokenName: this.tokenName, // Include in JSON
       tokenSymbol: this.tokenSymbol,
       tokenTotalSupply: this.tokenTotalSupply,
+      contractId: this.contractId,
+      method: this.method,
+      params: this.params,
+      result: this.result, // Include result in JSON
     };
   }
   
@@ -80,7 +92,11 @@ class Transaction {
       data.tokenId, // New property
       data.tokenName, // Initialize new fields
       data.tokenSymbol,
-      data.tokenTotalSupply
+      data.tokenTotalSupply,
+      data.contractId,
+      data.method,
+      data.params,
+      data.result
     );
     tx.hash = data.hash;
     return tx;
@@ -123,6 +139,18 @@ class Transaction {
 
     } catch (error) {
       throw new Error('Failed to sign with address: ' + error.message);
+    }
+  }
+
+  async signWithKeyPair(keyPair) {
+    try {
+      const dataToSign = this.calculateHash();
+      const signature = keyPair.sign(dataToSign, 'hex');
+      this.signature = signature.toDER('hex');
+      this.publicKey = keyPair.getPublic('hex');
+      this.hash = this.calculateHash(); // Update hash after signing
+    } catch (error) {
+      throw new Error('Failed to sign transaction: ' + error.message);
     }
   }
   
@@ -234,7 +262,10 @@ class Transaction {
       this.timestamp,
       this.signature,
       this.originTransactionHash,
-      this.tokenId // New field
+      this.tokenId, // New field
+      this.method,
+      JSON.stringify(this.params), // New field
+      this.contractId // New field
     ];
   
   
@@ -291,8 +322,6 @@ class Transaction {
     }
   }
 
-  // Get the latest transaction for a given address
-  // C:\ProjectsCaronia\AIBTCC-P2P\AIBTCC-P2P\src\transaction.js
 
 static async getLatestTransactionForAddress(address) {
     const query = `

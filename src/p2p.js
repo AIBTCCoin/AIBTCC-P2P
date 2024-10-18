@@ -220,7 +220,6 @@ async function handleReceivedBlock(receivedBlockData) {
       return 0; // Maintain original order if both are token creation or both are not
     });
 
-    console.log(`Processing Block ${newBlock.index} with ${newBlock.transactions.length} transactions.`);
   
     const added = await blockchainInstance.addBlock(newBlock);
     if (added) {
@@ -295,14 +294,6 @@ async function handleReceivedTransaction(receivedTxData, senderSocket) {
       `;
       const tokenValues = [tx.tokenId, tx.tokenName, tx.tokenSymbol, tx.tokenTotalSupply, tx.toAddress, tx.timestamp];
       await db.query(insertTokenQuery, tokenValues);
-
-      // Insert the initial token balance for the creator
-      const insertTokenBalanceQuery = `
-        INSERT INTO token_balances (address, token_id, balance)
-        VALUES (?, ?, ?)
-        ON DUPLICATE KEY UPDATE balance = balance + ?
-      `;
-      await db.query(insertTokenBalanceQuery, [tx.toAddress, tx.tokenId, tx.amount, tx.amount]);
     }
   } else if (tx.tokenId !== null) {
     // For regular token transactions, ensure the token exists
@@ -425,3 +416,7 @@ export {
   broadcastMiningLock,
   broadcastMiningUnlock,
 };
+
+
+
+
