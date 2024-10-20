@@ -1,5 +1,3 @@
-import { WasmFs } from '@wasmer/wasmfs';
-import { WASI } from 'wasi'; // Node.js's built-in WASI module
 import { db } from './db.js'; // Ensure you have a database connection
 import fs from 'fs';
 import path from 'path';
